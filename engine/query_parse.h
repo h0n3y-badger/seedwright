@@ -62,7 +62,8 @@ public:
 		pos = 0;
 		int e = parseOr(true, 0, 0);
 		if (pos < toks.size()) fail("unexpected '" + toks[pos].s + "'");
-		attach(parent, e);
+		if (q.n[e].kind == N_ALL && q.n[parent].kind == N_ALL) moveKids(parent, e);  // "a, b" at top level: no extra group
+		else attach(parent, e);
 	}
 
 	int newNode(int kind) {

@@ -10,3 +10,5 @@ oracle-legacy/build/
 oracle-legacy/run/
 oracle-legacy/run-server-*.log
 truth/*/run.log
+.claude/
+__pycache__/

@@ -38,24 +38,55 @@ Bit-exactness needs `-ffp-contract=off` / `-fmad=false` (already in the Makefile
 ## Use
 
 ```
-# 3 villages within 300 blocks of spawn, a monument within 800, a cherry grove within 1500
-engine/seedwright-gpu packs/26.3.pack search --need village:3@300 --need monument:1@800 --biome cherry_grove@1500
+# a plains village with 2 blacksmiths within 500 blocks of spawn, a cherry grove within 1500,
+# and no ocean monument within 800
+engine/seedwright-gpu packs/26.3.pack search --where \
+  '2 village_plains within 500 { 2 blacksmith }, biome cherry_grove within 1500, not monument within 800'
 
-# check specific seeds
-engine/seedwright-cpu packs/1.21.4.pack search --cpu --need trial_chambers:1@400 --seeds 12345,8675309
+# lush caves under spawn, and either a trial chamber or an ancient city nearby
+engine/seedwright-gpu packs/26.3.pack search --where \
+  'biome lush_caves within 100 at y=any, any { trial_chambers within 600, ancient_city within 800 }'
+
+# check given seeds (always exact)
+engine/seedwright-cpu packs/1.21.4.pack search --cpu --where 'trial_chambers within 400' --seeds 12345,8675309
 ```
-Filters: `--need NAME:COUNT@RADIUS` (structure or set name, substring ok: `village`, `village_snowy`,
-`monument`, `trial_chambers`, `outpost`, `abandoned_camp`, …), `--biome NAME@RADIUS` (y=64, 16-block grid),
-`--stronghold COUNT@RADIUS` (first ring), `--spawn-within RADIUS`. Distances are measured from the spawn origin
-(`--origin` for 0,0). Options: `--start/--count` (low-48 range), `--max N`, `--slack B` (how far spawn may
-be from 0,0 for the structure pre-filter, default 256), `--cpu`.
 
-GUI (PySide6): `python3 gui/seedwright_gui.py`. It runs the same CLI: each condition row is a
-`--need`/`--biome`/`--stronghold`/`--spawn-within`, with a slider and an editable entry for count and radius, and
-the exact command line is shown before it runs. Menu launcher: `gui/install.sh` (writes
+### Query language (`--where`)
+
+Conditions are separated by `,` (or `and`); everything is measured from the world spawn (`--origin`: from 0,0).
+
+| form | meaning |
+|---|---|
+| `[N] STRUCTURE within R [{ ... }]` | at least N (default 1) within R blocks; inside `{ }` is measured from that structure |
+| `biome NAME within R [at y=Y \| at y=any]` | biome on a 16-block grid; default y=64; `y=any` tries y -48..48 (cave biomes: `lush_caves`, `dripstone_caves`, `deep_dark`) |
+| `[N] strongholds within R [{ ... }]` | strongholds from any ring (up to 32) |
+| `[N] BUILDING` | inside a village's `{ }`: buildings in its layout, e.g. `2 blacksmith`, `library`, `temple` (approximate, see below) |
+| `spawn within R` | the world spawn itself is within R blocks of 0,0 (only useful for "spawn near the map centre") |
+| `any { a, b }`, `all { a, b }`, `not X`, `a or b`, `( )` | logic |
+
+STRUCTURE is a set (`villages`, `village`), an exact structure (`village_plains`), or a `*` pattern
+(`village_*`, `*ruin*`). Buildings accept vanilla's per-biome names and job names: `blacksmith`/`weaponsmith`,
+`toolsmith`, `armorer`, `butcher`, `mason`, `shepherd`, `fisher`, `fletcher`, `cartographer`, `library`/`librarian`,
+`temple`/`cleric`, `tannery`/`leatherworker`, `small_house`, `large_farm`, … (`seedwright <pack> list` prints all
+names; `seedwright <pack> parse '<query>'` prints the parsed tree as JSON). Old flags still work and can be mixed in:
+`--need NAME:COUNT@RADIUS` (substring match, `=NAME` exact), `--biome NAME@RADIUS[@Y|@any]`, `--stronghold COUNT@RADIUS`,
+`--spawn-within RADIUS`.
+
+Options: `--start/--count` (low-48 range), `--max N`, `--slack B`, `--cpu`, `--seeds a,b,c`.
+`--slack` (default 256) is a speed shortcut for searches: seeds whose spawn is farther than that from 0,0 are skipped
+(about 2% of seeds at 256). `--seeds` checks never use it.
+
+**Village buildings are approximate.** Layout assembly (jigsaw) matches vanilla piece for piece when given vanilla's
+terrain heights (149/149 villages and outposts against the oracle), but seedwright still estimates terrain height,
+and layouts are chaotic in it: per-category building counts agree with the game ~66% of the time. Use building
+conditions to find candidates, then check in game. Exact terrain height makes them exact without query changes.
+
+GUI (PySide6): `python3 gui/seedwright_gui.py`. Scratch-style blocks for the same language: drag blocks from the
+palette into the script, drop blocks into C-blocks (structures, strongholds, all/any/none) to measure them from
+there, drag a block back onto the palette to delete it. The query text under the blocks is the `--where` string and
+can be edited and turned back into blocks. Menu launcher: `gui/install.sh` (writes
 `~/.local/share/applications/seedwright-gui.desktop` pointing at this checkout; `doas gui/install.sh --system`
-puts it in `/usr/share/applications` for launchers that only read that, like tux; `--uninstall` removes it). `seedwright <pack> list` gives it the structure/biome names;
-`--need =NAME` picks one structure exactly (no set or substring matching).
+puts it in `/usr/share/applications` for launchers that only read that, like tux; `--uninstall` removes it).
 
 Pipeline: stage A tests only the low 48 bits (structure placement is pure LCG) at ~5.7 G seeds/s on an
 RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome/spawn checks
@@ -64,7 +95,9 @@ RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome
 ## Layout
 
 - `engine/sw_core.h`: RNGs, both noise engines, density-function program, RTree, spawn, placement (host+device)
-- `engine/structures.h`, `engine/query.h`: structure validation, strongholds, filters
+- `engine/structures.h`: structure validation, strongholds
+- `engine/query.h`, `engine/query_parse.h`: the condition tree (stage A / prefilter / exact evaluation) and the query language
+- `engine/jigsaw.h`: village (jigsaw) layouts
 - `engine/pack.h`: version-pack loader, RTree build
 - `tools/extract.py`: vanilla jar (+ oracle biome list) → `packs/<version>.pack`
 - `oracle/` (26.x, unobfuscated Loom) and `oracle-legacy/` (1.21.x, remapping Loom): headless ground-truth mod;
