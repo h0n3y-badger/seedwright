@@ -5,6 +5,7 @@
 #include "query_parse.h"
 #include "jigsaw_cli.h"
 #include <chrono>
+#include <functional>
 #include <cstdlib>
 #include <iostream>
 #include <set>
@@ -337,6 +338,8 @@ static Query parseQuery(const Pack& P, const StructTables& T, std::vector<std::s
 		}
 	}
 	q.exact = opt.count("seeds") ? 1 : 0;
+	q.buildingSlack = opt.count("building-slack") ? std::stoi(opt["building-slack"]) : 1;
+	q.buildingPass = opt.count("all-buildings") ? 1 : 0;
 	if (q.n[q.root].first < 0) throw std::runtime_error("no conditions (use --where '...' or --need/--biome/...)");
 	if (jsonOut) *jsonOut = queryJson(P, q, q.root, N, qp.label);
 	else fprintf(stderr, "query: %s\n", queryText(P, q, q.root, N, qp.label).c_str());
@@ -380,7 +383,31 @@ static std::vector<int64_t> parseSeeds(const std::string& s) {
 
 static double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt) {
+// Exact terrain for building conditions (terrain.h; 26.3+ packs). Without it building counts come from estimated
+// heights and are only roughly right (about two thirds of (village, building type) counts agree).
+static const Terrain* buildingTerrain(const Pack& P, const Query& q, const char* packPath) {
+	static Terrain TR;
+	static bool tried = false;
+	if (!q.hasBuildings) return nullptr;
+	if (!tried) {
+		tried = true;
+		if (!TR.load(packPath))
+			fprintf(stderr, "warning: building counts are APPROXIMATE for %s (no exact terrain for this version; only 26.3+ packs have it): "
+			                "a reported village may have fewer or more of a building\n", P.version.c_str());
+	}
+	return TR.ok ? &TR : nullptr;
+}
+
+// stageB with exact terrain heights (host). w: scratch World.
+static bool stageBExact(const Pack& P, const StructTables& T, const Query& q, const Terrain& TR, int64_t seed, World& w, std::vector<Piece>& pcs, Hit& h) {
+	worldInit(w, *P.dev, seed);
+	TerrainWorld tw(TR, seed);
+	HeightGrid g = terrainGrid(tw);
+	pcs.resize(1024);  // no device stack limit here: never truncate a big village (they reach ~300)
+	return stageB(w, *P.dev, T, q, h, jig(P).t.get(), pcs.data(), &g, false, (int)pcs.size());
+}
+
+static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt, const Terrain* TR) {
 	const JigsawTables* J = jig(P).t.get();
 	const PackDev& pk = *P.dev;
 	long long maxResults = opt.count("max") ? std::stoll(opt["max"]) : 20;
@@ -391,7 +418,8 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 			worldInit(*w, pk, s);
 			Hit h;
 			std::vector<Piece> pcs(q.hasBuildings ? MAX_PIECES : 0);
-			bool ok = stageB(*w, pk, T, q, h, J, pcs.data());  // q.exact: no stage A / slack prefilter for given seeds
+			// q.exact: no stage A / slack prefilter for given seeds
+			bool ok = TR ? stageBExact(P, T, q, *TR, s, *w, pcs, h) : stageB(*w, pk, T, q, h, J, pcs.data());
 			if (ok && opt.count("check-stage-a") && !stageA(T, q, (uint64_t)s)) printf("STAGE-A-UNSOUND %lld\n", (long long)s);  // test aid
 			if (ok) printHit(P, h);
 			else printf("%lld  no match\n", (long long)s);
@@ -438,7 +466,10 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 					int64_t s = (int64_t)(((uint64_t)hi << 48) | lo);
 					worldInit(*w, pk, s);
 					Hit h;
-					if (stageB(*w, pk, T, q, h, J, pcs.data()) && found++ < maxResults) {
+					// buildings: estimated-terrain prefilter, then the exact check
+					bool ok = stageB(*w, pk, T, q, h, J, pcs.data(), nullptr, TR != nullptr);
+					if (ok && TR) ok = stageBExact(P, T, q, *TR, s, *w, pcs, h);
+					if (ok && found++ < maxResults) {
 						std::lock_guard<std::mutex> g(mu);
 						printHit(P, h);
 					}
@@ -471,19 +502,20 @@ __global__ void kStageA(const StructTables* T, const Query* q, uint64_t start, u
 }
 
 __global__ void kStageB(const PackDev* pk, const StructTables* T, const Query* q, const int64_t* seeds, unsigned n, World* worlds, Hit* hits, unsigned* nhits, unsigned cap,
-                        const JigsawTables* J, Piece* pieces) {
+                        const JigsawTables* J, Piece* pieces, int prefilter) {
 	World& w = worlds[blockIdx.x * blockDim.x + threadIdx.x];
 	for (unsigned i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {
 		worldInit(w, *pk, seeds[i]);
 		Hit h;
-		if (stageB(w, *pk, *T, *q, h, J, pieces ? pieces + (size_t)(blockIdx.x * blockDim.x + threadIdx.x) * MAX_PIECES : nullptr)) {
+		if (stageB(w, *pk, *T, *q, h, J, pieces ? pieces + (size_t)(blockIdx.x * blockDim.x + threadIdx.x) * MAX_PIECES : nullptr, nullptr, prefilter != 0)) {
 			unsigned k = atomicAdd(nhits, 1u);
 			if (k < cap) hits[k] = h;
 		}
 	}
 }
 
-static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt) {
+static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt, const Terrain* TR) {
+	if (TR && opt.count("seeds")) return searchCpu(P, T, q, opt, TR);  // given seeds + buildings: exact check on the CPU
 	long long maxResults = opt.count("max") ? std::stoll(opt["max"]) : 20;
 	CK(cudaDeviceSetLimit(cudaLimitStackSize, q.hasBuildings ? 24576 : 16384));
 	PackDev* dPk;
@@ -524,22 +556,44 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 	CK(cudaMalloc(&dSeeds, sizeof(int64_t) * batch));
 	std::vector<int64_t> hseeds;
 	long long found = 0;
-	auto runB = [&](const std::vector<int64_t>& seeds) {
-		for (size_t off = 0; off < seeds.size() && found < maxResults; off += batch) {
-			unsigned n = (unsigned)std::min<size_t>(batch, seeds.size() - off);
-			CK(cudaMemcpy(dSeeds, seeds.data() + off, sizeof(int64_t) * n, cudaMemcpyHostToDevice));
-			CK(cudaMemset(dNH, 0, 4));
-			kStageB<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dHits, dNH, capH, dJ, dPieces);
-			CK(cudaGetLastError());
-			unsigned nh;
-			CK(cudaMemcpy(&nh, dNH, 4, cudaMemcpyDeviceToHost));
-			nh = std::min(nh, capH);
-			std::vector<Hit> hits(nh);
-			CK(cudaMemcpy(hits.data(), dHits, sizeof(Hit) * nh, cudaMemcpyDeviceToHost));
-			std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.seed < b.seed; });
+	long long prefilterHits = 0;
+	// one launch over seeds[off, off+n); more hits than the buffer holds -> halves (no hit is dropped)
+	std::function<void(const std::vector<int64_t>&, size_t, unsigned)> launch = [&](const std::vector<int64_t>& seeds, size_t off, unsigned n) {
+		CK(cudaMemcpy(dSeeds, seeds.data() + off, sizeof(int64_t) * n, cudaMemcpyHostToDevice));
+		CK(cudaMemset(dNH, 0, 4));
+		kStageB<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dHits, dNH, capH, dJ, dPieces, TR != nullptr);
+		CK(cudaGetLastError());
+		unsigned nh;
+		CK(cudaMemcpy(&nh, dNH, 4, cudaMemcpyDeviceToHost));
+		if (nh > capH && n > 1) {
+			launch(seeds, off, n / 2);
+			if (found < maxResults) launch(seeds, off + n / 2, n - n / 2);
+			return;
+		}
+		nh = std::min(nh, capH);
+		std::vector<Hit> hits(nh);
+		CK(cudaMemcpy(hits.data(), dHits, sizeof(Hit) * nh, cudaMemcpyDeviceToHost));
+		std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.seed < b.seed; });
+		if (TR) {  // GPU result = estimated-terrain prefilter; exact building check on the CPU
+			prefilterHits += nh;
+			std::vector<char> ok(nh, 0);
+#pragma omp parallel
+			{
+				World* w = new World();
+				std::vector<Piece> pcs;
+#pragma omp for schedule(dynamic, 1)
+				for (long long i = 0; i < (long long)nh; i++) ok[i] = stageBExact(P, T, q, *TR, hits[i].seed, *w, pcs, hits[i]);
+				delete w;
+			}
+			for (unsigned i = 0; i < nh; i++)
+				if (ok[i] && found++ < maxResults) printHit(P, hits[i]);
+		} else {
 			for (auto& h : hits)
 				if (found++ < maxResults) printHit(P, h);
 		}
+	};
+	auto runB = [&](const std::vector<int64_t>& seeds) {
+		for (size_t off = 0; off < seeds.size() && found < maxResults; off += batch) launch(seeds, off, (unsigned)std::min<size_t>(batch, seeds.size() - off));
 	};
 	if (opt.count("seeds")) {
 		auto v = parseSeeds(opt["seeds"]);
@@ -589,6 +643,8 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		if (tested) fprintf(stderr, "\n");
 	}
 	if (!survivors) fprintf(stderr, "hint: no seed in this range can place the structures this close (counts too high or distances too small for how far apart they spawn)\n");
+	if (TR) fprintf(stderr, "buildings: %lld seeds passed the GPU prefilter (estimated terrain, slack %d), exact check kept %lld\n", prefilterHits,
+	                q.buildingSlack, std::min(found, maxResults));
 	fprintf(stderr, "done: %lld full seeds tested, %lld results\n", tested, std::min(found, maxResults));
 	return 0;
 }
@@ -681,10 +737,11 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "%s\n", e.what());
 			return 2;
 		}
+		const Terrain* TR = buildingTerrain(P, q, argv[1]);
 #ifndef SW_CPU_ONLY
-		if (!opt.count("cpu")) return searchGpu(P, T, q, opt);
+		if (!opt.count("cpu")) return searchGpu(P, T, q, opt, TR);
 #endif
-		return searchCpu(P, T, q, opt);
+		return searchCpu(P, T, q, opt, TR);
 	}
 	fprintf(stderr, "unknown command %s\n", cmd.c_str());
 	return 2;

@@ -198,6 +198,245 @@ class DfCompiler:
         self.splines.append(('m', coord, pts))
         return len(self.splines) - 1
 
+# ---------------- terrain (26.3+ float density samplers: final density + aquifer) ----------------
+
+class TerrainCompiler:
+    """Mirrors 26.3's DensityFunctionCompiler for the functions getBaseHeight needs: references inlined, caches
+    deduplicated by their (raw) input, then DfRewriteRule.SLICE_UNIFORM_AXES. Emits a flat node table (hash-consed,
+    children first) that engine/terrain.h compiles into the same sampler variants vanilla picks."""
+
+    def __init__(self, jar):
+        self.jar = jar
+        self.caches = {}  # canonical raw input -> (id, rewritten input)
+        self.cache_inputs = []
+        self.noises, self.noise_index = [], {}
+        self.nodes, self.node_index = [], {}
+
+    def noise(self, name):
+        name = name if ':' in name else 'minecraft:' + name
+        if name not in self.noise_index:
+            self.noise_index[name] = len(self.noises)
+            self.noises.append(name)
+        return self.noise_index[name]
+
+    # ---- pass 1: inline references, prepare caches (DensityFunctionCompiler.optimizerRule, first rule)
+    def p1(self, n):
+        if isinstance(n, str):
+            return self.p1(self.jar.json('worldgen/density_function', n))
+        if isinstance(n, (int, float)):
+            return ('const', f32bits(n))
+        t = n['type'].removeprefix('minecraft:')
+        g = n.get
+        if t == 'cache':
+            key = json.dumps(n['input'], sort_keys=True)
+            if key not in self.caches:
+                cid = len(self.cache_inputs)
+                self.cache_inputs.append(None)
+                inp = self.slice(self.p1(n['input']), 7)
+                self.cache_inputs[cid] = inp
+                self.caches[key] = cid
+            return ('pcache', self.caches[key])
+        if t == 'constant':
+            return ('const', f32bits(g('argument', g('value'))))
+        if t in ('add', 'sub', 'mul', 'div', 'min', 'max'):
+            return (t, self.p1(n['left']), self.p1(n['right']))
+        if t in ('abs', 'square', 'cube', 'sqrt', 'half_negative', 'quarter_negative', 'reciprocal', 'negate', 'squeeze', 'log', 'sign',
+                 'blend_density'):
+            return (t, self.p1(n['input']))
+        if t == 'clamp':
+            return ('clamp', f32bits(n['min']), f32bits(n['max']), self.p1(n['input']))
+        if t == 'lerp':
+            return ('lerp', self.p1(n['alpha']), self.p1(n['first']), self.p1(n['second']))
+        if t == 'range_choice':
+            return ('range_choice', f32bits(n['min_inclusive']), f32bits(n['max_exclusive']), self.p1(n['input']),
+                    self.p1(n['when_in_range']), self.p1(n['when_out_of_range']))
+        if t == 'interval_select':
+            return ('interval_select', tuple(f32bits(x) for x in n['thresholds']), self.p1(n['input'])) + tuple(self.p1(f) for f in n['functions'])
+        if t == 'gradient':
+            return ('gradient', 'xyz'.index(n['axis']), n.get('tiling', 'clamp_to_edge'), n['from_coordinate'], n['to_coordinate'],
+                    f32bits(n['from_value']), f32bits(n['to_value']))
+        if t == 'noise':
+            return ('noise', self.noise(n['noise']), dbits(n.get('xz_scale', 1.0)), dbits(n.get('y_scale', 1.0)),
+                    self.p1(n.get('shift_x', 0.0)), self.p1(n.get('shift_y', 0.0)), self.p1(n.get('shift_z', 0.0)))
+        if t in ('shift_a', 'shift_b', 'shift'):
+            return (t, self.noise(n.get('noise', n.get('argument'))))
+        if t == 'spline':
+            return ('spline', self.p1spline(n['spline']))
+        if t == 'interpolated':
+            return ('interpolated', n['cell_size_xz'], n['cell_size_y'], self.p1(n['input']))
+        if t == 'find_top_surface':
+            return ('find_top', n['lower_bound'], n['cell_height'], self.p1(n['density']), self.p1(n['upper_bound']))
+        if t == 'old_blended_noise':
+            return ('blended', dbits(n['xz_scale']), dbits(n['y_scale']), dbits(n['xz_factor']), dbits(n['y_factor']),
+                    dbits(n['smear_scale_multiplier']))
+        if t in ('blend_alpha', 'blend_offset', 'beardifier'):
+            return (t,)
+        raise ValueError(f'terrain: unsupported density function type {t}')
+
+    def p1spline(self, s):
+        if isinstance(s, (int, float)):
+            return ('c', f32bits(s))
+        return ('m', self.p1(s['coordinate']), tuple((f32bits(p['location']), f32bits(p.get('derivative', 0.0)), self.p1spline(p['value']))
+                                                     for p in s['points']))
+
+    # ---- DensityFunction.domainAxes (x=1, y=2, z=4)
+    def axes(self, t):
+        k = t[0]
+        if k == 'const':
+            return 0
+        if k in ('blend_alpha', 'blend_offset', 'shift_a', 'shift_b'):
+            return 5
+        if k in ('beardifier', 'shift', 'blended'):
+            return 7
+        if k == 'gradient':
+            return 1 << t[1] if t[1] != 2 else 4
+        if k == 'noise':
+            a = 7
+            if struct.unpack('<d', struct.pack('<Q', t[3]))[0] == 0.0:
+                a &= ~2
+            if struct.unpack('<d', struct.pack('<Q', t[2]))[0] == 0.0:
+                a &= ~5
+            return a | self.axes(t[4]) | self.axes(t[5]) | self.axes(t[6])
+        if k == 'pcache':
+            return self.axes(self.cache_inputs[t[1]])
+        if k == 'slice':
+            return self.axes(t[3]) & ~(4 if t[1] == 2 else 1 << t[1])
+        if k == 'find_top':
+            return (self.axes(t[3]) | self.axes(t[4])) & ~2
+        if k == 'spline':
+            return self.spline_axes(t[1])
+        a = 0
+        for c in self.children(t):
+            a |= self.axes(c)
+        return a
+
+    def spline_axes(self, s):
+        if s[0] == 'c':
+            return 0
+        a = self.axes(s[1])
+        for _, _, v in s[2]:
+            a |= self.spline_axes(v)
+        return a
+
+    @staticmethod
+    def child_slots(t):
+        k = t[0]
+        if k in ('clamp',):
+            return [3]
+        if k == 'range_choice':
+            return [3, 4, 5]
+        if k == 'interval_select':
+            return list(range(2, len(t)))
+        if k == 'noise':
+            return [4, 5, 6]
+        if k == 'interpolated':
+            return [3]
+        if k == 'find_top':
+            return [3, 4]
+        if k == 'slice':
+            return [3]
+        if k in ('const', 'gradient', 'shift_a', 'shift_b', 'shift', 'blended', 'blend_alpha', 'blend_offset', 'beardifier', 'pcache', 'spline'):
+            return []
+        return list(range(1, len(t)))
+
+    def children(self, t):
+        return [t[i] for i in self.child_slots(t)]
+
+    def rewrite_children(self, t, f):
+        if t[0] == 'spline':
+            return ('spline', self.spline_map(t[1], f))
+        slots = self.child_slots(t)
+        if not slots:
+            return t
+        l = list(t)
+        for i in slots:
+            l[i] = f(l[i])
+        return tuple(l)
+
+    def spline_map(self, s, f):
+        if s[0] == 'c':
+            return s
+        return ('m', f(s[1]), tuple((a, b, self.spline_map(v, f)) for a, b, v in s[2]))
+
+    # ---- pass 2: DfRewriteRule.SliceUniformAxes
+    def slice(self, t, parent):
+        if t[0] in ('const', 'gradient'):
+            return t
+        a = self.axes(t)
+        if a == parent:
+            return self.rewrite_children(t, lambda c: self.slice(c, parent))
+        nt = self.rewrite_children(t, lambda c: self.slice(c, a))
+        removed = parent & ~a
+        existing, u = 0, nt
+        while u[0] == 'slice':
+            existing |= 4 if u[1] == 2 else 1 << u[1]
+            u = u[3]
+        removed &= ~existing
+        if removed & 1:
+            nt = ('slice', 0, 0, nt)
+        if removed & 4:
+            nt = ('slice', 2, 0, nt)
+        if removed & 2:
+            nt = ('slice', 1, 0, nt)
+        return nt
+
+    def root(self, n):
+        return self.emit(self.slice(self.p1(n), 7))
+
+    # ---- emission: "kind | ints | children" per node, children first (deduplicated)
+    def emit(self, t):
+        if t in self.node_index:
+            return self.node_index[t]
+        k = t[0]
+        if k == 'spline':
+            line = 'spline | | ' + self.emit_spline(t[1])
+        elif k == 'pcache':
+            line = f'cache | {t[1]:x} |'
+        else:
+            kids = [self.emit(c) for c in self.children(t)]
+            slots = set(self.child_slots(t))
+            ints = []
+            for i, v in enumerate(t[1:], 1):
+                if i in slots:
+                    continue
+                if isinstance(v, tuple):
+                    ints += [len(v)] + list(v)
+                elif isinstance(v, str):
+                    ints.append(['clamp_to_edge', 'repeat', 'mirrored_repeat'].index(v))
+                else:
+                    ints.append(v)
+            line = f'{k} | {" ".join(f"{x:x}" if x >= 0 else "-" + format(-x, "x") for x in ints)} | {" ".join(map(str, kids))}'
+        self.nodes.append(line)
+        self.node_index[t] = len(self.nodes) - 1
+        return self.node_index[t]
+
+    def emit_spline(self, s):
+        if s[0] == 'c':
+            return f'c {s[1]:x}'
+        coord = self.emit(s[1])
+        return f'm {coord} {len(s[2])} ' + ' '.join(f'{a:x} {b:x} ( {self.emit_spline(v)} )' for a, b, v in s[2])
+
+
+def terrain_section(jar, ns):
+    """Final density + aquifer for ChunkGenerator.getBaseHeight (26.3 float samplers only)."""
+    tc = TerrainCompiler(jar)
+    router = ns['noise_router']
+    aq = ns.get('aquifers')
+    roots = [tc.root(router['final_density'])]
+    if aq:
+        roots += [tc.root(aq[k]) for k in ('barrier', 'fluid_level_floodedness', 'fluid_level_spread', 'lava', 'exclusion', 'surface_level')]
+    caches = [tc.emit(c) for c in tc.cache_inputs]
+    out = [f'terrain 1 {ns["noise"]["min_y"]} {ns["noise"]["height"]} {ns["sea_level"]} {1 if aq else 0} {ns["default_fluid"]}']
+    out.append(f'terrain_noises {len(tc.noises)}')
+    for name in tc.noises:
+        layers = noise_layers(jar.json('worldgen/noise', name))
+        out.append(f'{name} {len(layers)} ' + ' '.join(f'{o} {dbits(fr):x} {f32bits(a):x}' for o, fr, a in layers))
+    out.append(f'terrain_nodes {len(tc.nodes)}')
+    out += tc.nodes
+    out.append('terrain_caches ' + ' '.join(map(str, [len(caches)] + caches)))
+    out.append('terrain_roots ' + ' '.join(map(str, [len(roots)] + roots)))
+    return out
+
 # ---------------- structures ----------------
 
 def structure_entry(jar, name):
@@ -546,6 +785,8 @@ def main():
         w(f'{name} {e["type"]} {e.get("project", "-") or "-"} {e["y"]} {len(e["biomes"])} {" ".join(e["biomes"])}')
     # appended last so older loaders (which stop after "structures") still read the pack
     out.extend(jigsaw_section(jar, version, [n for n, e in structs.items() if e['type'] == 'jigsaw']))
+    if not legacy:  # exact terrain heights (26.3 float samplers); after jigsaw so older loaders ignore it
+        out.extend(terrain_section(jar, ns))
     open(out_path, 'w').write('\n'.join(out) + '\n')
     print(f'{out_path}: {len(biome_ids)} biomes, {len(params)} params, {len(dfc.ops)} ops, {len(dfc.noises)} noises, '
           f'{len(sets)} structure sets')
