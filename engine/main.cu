@@ -543,7 +543,8 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		if (q.hasBuildings) CK(cudaMalloc(&dPieces, sizeof(Piece) * MAX_PIECES * (size_t)nWorlds));
 	}
 	const unsigned long long capA = 1ull << 22;
-	const unsigned capH = 4096;
+	const unsigned batch = 1u << 18;
+	const unsigned capH = batch;  // every seed of a batch can match: never redo a launch (a common biome matches most seeds)
 	uint64_t* dLows;
 	unsigned long long* dN;
 	unsigned* dNH;
@@ -553,7 +554,6 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 	CK(cudaMalloc(&dNH, 4));
 	CK(cudaMalloc(&dHits, sizeof(Hit) * capH));
 	int64_t* dSeeds;
-	const unsigned batch = 1u << 18;
 	CK(cudaMalloc(&dSeeds, sizeof(int64_t) * batch));
 	std::vector<int64_t> hseeds;
 	long long found = 0;
