@@ -12,3 +12,4 @@ oracle-legacy/run-server-*.log
 truth/*/run.log
 .claude/
 __pycache__/
+/packs/

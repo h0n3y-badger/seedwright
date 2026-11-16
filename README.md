@@ -6,6 +6,20 @@ Clean-room Minecraft (vanilla, Java Edition) seed generation + seed finder, CPU 
 Written from vanilla's own (deobfuscated) worldgen sources and data packs, checked against the real game.
 No third-party seed tools were read.
 
+## Building
+
+You need a vanilla Minecraft jar (client or server, from the official launcher or Mojang's download page) for
+each version you want: the game's worldgen data is read from it and isn't redistributed here.
+
+```
+make -C engine                                  # seedwright-cpu (g++ + OpenMP) and seedwright-gpu (CUDA, sm_120)
+tools/build-packs.sh ~/path/to/jars 26.3        # jars named <version>.jar -> packs/26.3.pack
+engine/seedwright-gpu packs/26.3.pack search --where 'village_plains within 300' --max 5
+python3 gui/seedwright_gui.py                   # GUI (PySide6)
+```
+
+The GPU build targets sm_120 (RTX 50 series); change `-arch` in `engine/Makefile` for other cards.
+
 ## What is bit-exact (verified against vanilla, all 16 versions)
 
 `tools/verify-all.sh` rebuilds every version pack and compares with ground truth dumped by the headless
@@ -140,3 +154,8 @@ RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome
 - GPU stage B is one thread per seed; a block-per-seed version would be much faster
 - stronghold conditions are slow (~1–2k seeds/s on GPU: each stronghold near the edge of the radius needs a
   57×57 biome search); jigsaw structures other than villages/outposts aren't oracle-checked; trial chambers have no layouts
+
+## License
+
+MIT (see `LICENSE`). Not affiliated with or endorsed by Mojang or Microsoft; Minecraft is their trademark.
+No game files are included: packs are built locally from your own jars.

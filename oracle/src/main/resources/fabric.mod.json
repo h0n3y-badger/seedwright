@@ -4,7 +4,7 @@
 	"version": "${version}",
 	"name": "Seedwright Oracle",
 	"description": "Dev-only: dumps vanilla worldgen ground truth for the seedwright seed finder.",
-	"license": "AGPL-3.0-only",
+	"license": "MIT",
 	"environment": "*",
 	"mixins": ["seedwright_oracle.mixins.json"],
 	"depends": { "fabricloader": ">=0.19.5", "minecraft": "*" }
