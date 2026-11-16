@@ -106,7 +106,9 @@ RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome
 
 ## Not done yet
 
-- exact terrain height (final density) → exact structure starts, real spawn block, surface biomes
+- exact terrain height (final density) → exact structure starts, exact village buildings, real spawn block, surface biomes
 - ores (decoration seeds + ore placement + whether the blocks survive terrain/caves)
 - `--biome` at the real surface; nether/end
 - GPU stage B is one thread per seed; a block-per-seed version would be much faster
+- stronghold conditions are slow (~1–2k seeds/s on GPU: each stronghold near the edge of the radius needs a
+  57×57 biome search); jigsaw structures other than villages/outposts aren't oracle-checked; trial chambers have no layouts
