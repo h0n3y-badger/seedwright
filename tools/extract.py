@@ -413,7 +413,11 @@ def jigsaw_section(jar, version, jigsaw_structs):
             return hi - lo + 1
         return 0
 
-    out = [f'jigsaw 1 {"*" if version.startswith("26.3") else "minecraft:bottom"}']
+    # FeaturePoolElement's jigsaw name: "minecraft:bottom" up to 26.2, null since 26.3 (read from the class when
+    # the jar is unobfuscated; obfuscated jars are all <= 1.21.11)
+    cls = 'net/minecraft/world/level/levelgen/structure/pools/FeaturePoolElement.class'
+    fname = 'minecraft:bottom' if cls not in jar.names or b'bottom' in jar.z.read(cls) else '*'
+    out = [f'jigsaw 1 {fname}']
     # pool names first (nid order is independent)
     for p in pools:
         size = sum(wt for _, wt in p['entries'])

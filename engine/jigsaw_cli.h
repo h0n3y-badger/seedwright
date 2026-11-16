@@ -94,7 +94,93 @@ inline std::map<std::string, int> categoryCounts(const OracleStart& s) {
 	return m;
 }
 
-enum { CLI_MAX_PIECES = 1024 };
+enum { CLI_MAX_PIECES = 1024, GPU_MAX_PIECES = 400 };
+
+// bench seeds: candidate chunk of village region (0,0) for seed i
+HD int64_t benchSeed(int i) { return (int64_t)mixStafford13((uint64_t)i + 777); }
+
+#ifndef SW_CPU_ONLY
+#define JCK(x)                                                                                                  \
+	do {                                                                                                        \
+		cudaError_t e_ = (x);                                                                                   \
+		if (e_ != cudaSuccess) {                                                                                \
+			fprintf(stderr, "CUDA %s at %s:%d\n", cudaGetErrorString(e_), __FILE__, __LINE__);                  \
+			exit(1);                                                                                            \
+		}                                                                                                       \
+	} while (0)
+
+// one thread per seed: village start + layout at the seed's region (0,0) candidate; out = piece count
+// (-2 = no village there), cat = pieces of category `cat`
+__global__ void kJigsawLayout(const PackDev* pk, const StructTables* T, const JigsawTables* J, int set, int n, World* worlds, Piece* pieces, int* out,
+                              int* catOut, int cat) {
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= n) return;
+	int64_t seed = benchSeed(i);
+	World& w = worlds[i];
+	worldInit(w, *pk, seed);
+	int px, pz;
+	spreadCandidate(T->sets[set].spread, (uint64_t)seed, 0, 0, px, pz);
+	int st = jigsawStructureAt(w, *pk, *T, *J, set, px, pz);
+	Piece* pc = pieces + (size_t)i * GPU_MAX_PIECES;
+	int m = st < 0 ? -2 : jigsawLayout(w, *pk, *J, st, px, pz, pc, GPU_MAX_PIECES);
+	out[i] = m;
+	catOut[i] = m > 0 ? countCategory(*J, pc, m, cat) : 0;
+}
+
+// GPU vs CPU: same piece counts / category counts; returns mismatches
+inline int gpuCheck(const Pack& P, const StructTables& T, const JigsawHost& H, int set, int n) {
+	const JigsawTables& J = *H.t;
+	int cat = H.categoryIndex("small_house");
+	JCK(cudaDeviceSetLimit(cudaLimitStackSize, 16384));
+	PackDev* dPk;
+	StructTables* dT;
+	JigsawTables* dJ;
+	World* dW;
+	Piece* dP;
+	int *dOut, *dCat;
+	JCK(cudaMalloc(&dPk, sizeof(PackDev)));
+	JCK(cudaMalloc(&dT, sizeof(StructTables)));
+	JCK(cudaMalloc(&dJ, sizeof(JigsawTables)));
+	JCK(cudaMalloc(&dW, sizeof(World) * n));
+	JCK(cudaMalloc(&dP, sizeof(Piece) * GPU_MAX_PIECES * n));
+	JCK(cudaMalloc(&dOut, sizeof(int) * n));
+	JCK(cudaMalloc(&dCat, sizeof(int) * n));
+	JCK(cudaMemcpy(dPk, P.dev.get(), sizeof(PackDev), cudaMemcpyHostToDevice));
+	JCK(cudaMemcpy(dT, &T, sizeof T, cudaMemcpyHostToDevice));
+	JCK(cudaMemcpy(dJ, &J, sizeof J, cudaMemcpyHostToDevice));
+	kJigsawLayout<<<(n + 63) / 64, 64>>>(dPk, dT, dJ, set, n, dW, dP, dOut, dCat, cat);  // warm-up
+	JCK(cudaDeviceSynchronize());
+	double t0 = now();
+	kJigsawLayout<<<(n + 63) / 64, 64>>>(dPk, dT, dJ, set, n, dW, dP, dOut, dCat, cat);
+	JCK(cudaGetLastError());
+	JCK(cudaDeviceSynchronize());
+	double t1 = now();
+	std::vector<int> out(n), cats(n);
+	JCK(cudaMemcpy(out.data(), dOut, sizeof(int) * n, cudaMemcpyDeviceToHost));
+	JCK(cudaMemcpy(cats.data(), dCat, sizeof(int) * n, cudaMemcpyDeviceToHost));
+	cudaFree(dPk); cudaFree(dT); cudaFree(dJ); cudaFree(dW); cudaFree(dP); cudaFree(dOut); cudaFree(dCat);
+	World* w = new World();
+	std::vector<Piece> buf(GPU_MAX_PIECES);
+	int bad = 0, villages = 0;
+	for (int i = 0; i < n; i++) {
+		int64_t seed = benchSeed(i);
+		worldInit(*w, *P.dev, seed);
+		int px, pz;
+		spreadCandidate(T.sets[set].spread, (uint64_t)seed, 0, 0, px, pz);
+		int st = jigsawStructureAt(*w, *P.dev, T, J, set, px, pz);
+		int m = st < 0 ? -2 : jigsawLayout(*w, *P.dev, J, st, px, pz, buf.data(), GPU_MAX_PIECES);
+		int c = m > 0 ? countCategory(J, buf.data(), m, cat) : 0;
+		villages += m > 0;
+		if (m != out[i] || c != cats[i]) {
+			if (bad++ < 5) printf("  seed %lld: cpu %d pieces (%d small houses), gpu %d (%d)\n", (long long)seed, m, c, out[i], cats[i]);
+		}
+	}
+	delete w;
+	printf("gpu: %d seeds (%d villages) in %.1f ms incl. worldInit + start check (%.2f us/seed); cpu/gpu mismatches: %d\n", n, villages,
+	       (t1 - t0) * 1e3, (t1 - t0) / n * 1e6, bad);
+	return bad;
+}
+#endif
 
 }  // namespace jcli
 
@@ -180,10 +266,13 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 
 	if (cmd == "village-verify") {
 		// per start: structure choice, piece list with the estimated heights, piece list with vanilla's heights
-		int tot = 0, stOk = 0, exactEst = 0, catsEst = 0, exactTrue = 0, catsTrue = 0, countEst = 0;
+		int tot = 0, stOk = 0, exactEst = 0, catsEst = 0, exactTrue = 0, catsTrue = 0, countEst = 0, xzEst = 0, xzTrue = 0;
+		long long catPairs = 0, catPairsOk = 0, bVan = 0, bEst = 0, bAbs = 0;
+		std::map<std::string, std::array<int, 2>> catDiff;  // category -> (villages where we have more, fewer)
 		long long dh = 0, dh2 = 0, nh = 0, nhBad = 0;
 		std::map<std::string, std::array<int, 3>> perType;  // starts, exact (est), exact (true heights)
 		bool verbose = getenv("SW_VERBOSE") != nullptr;
+		int dumpRadius = getenv("SW_RADIUS") ? atoi(getenv("SW_RADIUS")) : 100, candTot = 0, candJig = 0, candOld = 0;  // oracle villages=R
 		for (int f = 3; f < argc; f++) {
 			int64_t seed;
 			std::vector<OracleStart> starts;
@@ -194,6 +283,24 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 			World* w = new World();
 			worldInit(*w, pk, seed);
 			printf("== %s (seed %lld): %zu starts\n", argv[f], (long long)seed, starts.size());
+			// start selection over every candidate of the dumped sets (the dump covers all candidates within R)
+			{
+				std::map<std::pair<int, int>, std::string> van;
+				for (auto& s : starts) van[{s.cx, s.cz}] = s.structure;
+				for (int si = 0; si < T.nsets; si++) {
+					if (P.sets[si].name != "villages" && P.sets[si].name != "pillager_outposts") continue;
+					for (int cx = -dumpRadius; cx <= dumpRadius; cx++)
+						for (int cz = -dumpRadius; cz <= dumpRadius; cz++) {
+							if (!isStructureChunk(T, si, (uint64_t)seed, cx, cz)) continue;
+							auto v = van.find({cx, cz});
+							std::string want = v == van.end() ? "-" : v->second;
+							int a = jigsawStructureAt(*w, pk, T, J, si, cx, cz), b = structureAt(*w, pk, T, si, cx, cz);
+							candTot++;
+							candJig += (a >= 0 ? P.structures[a].name : "-") == want;
+							candOld += (b >= 0 ? P.structures[b].name : "-") == want;
+						}
+				}
+			}
 			for (auto& s : starts) {
 				auto it = P.structureIndex.find(s.structure);
 				if (it == P.structureIndex.end()) continue;
@@ -221,6 +328,10 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 					want.insert(s.elem[i] + b);
 				}
 				auto wantCats = categoryCounts(s);
+				std::multiset<std::string> wantXZ;  // ignoring y (heights only move pieces vertically)
+				for (size_t i = 0; i < s.elem.size(); i++)
+					wantXZ.insert(s.elem[i] + " " + std::to_string(s.rot[i]) + " " + std::to_string(s.box[i][0]) + " " + std::to_string(s.box[i][2]) + " " +
+					              std::to_string(s.box[i][3]) + " " + std::to_string(s.box[i][5]));
 				auto& pt = perType[s.structure];
 				pt[0]++;
 				for (int mode = 0; mode < 2; mode++) {
@@ -229,7 +340,26 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 					for (int i = 0; i < n; i++) got.insert(pieceDesc(P, buf[i], s.cx << 4, s.cz << 4));
 					bool exact = got == want;
 					bool cats = n > 0 && categoryCounts(H, buf.data(), n) == wantCats;
+					std::multiset<std::string> gotXZ;
+					for (int i = 0; i < n; i++)
+						gotXZ.insert(elementName(P, buf[i].elem) + " " + std::to_string(buf[i].rot) + " " + std::to_string(buf[i].x0 + (s.cx << 4)) + " " +
+						             std::to_string(buf[i].z0 + (s.cz << 4)) + " " + std::to_string(buf[i].x1 + (s.cx << 4)) + " " +
+						             std::to_string(buf[i].z1 + (s.cz << 4)));
+					if (mode == 1) xzTrue += gotXZ == wantXZ;
 					if (mode == 0) {
+						xzEst += gotXZ == wantXZ;
+						auto gc = categoryCounts(H, buf.data(), n);
+						for (int c : H.structCategories[J.structOf[st]]) {
+							const std::string& cn = H.categories[c];
+							int a = gc.count(cn) ? gc[cn] : 0, b = wantCats.count(cn) ? wantCats.at(cn) : 0;
+							catPairs++;
+							catPairsOk += a == b;
+							bEst += a;
+							bVan += b;
+							bAbs += std::abs(a - b);
+							if (a > b) catDiff[cn][0]++;
+							if (a < b) catDiff[cn][1]++;
+						}
 						exactEst += exact;
 						catsEst += cats;
 						countEst += n == (int)s.elem.size();
@@ -267,10 +397,21 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 			}
 			delete w;
 		}
+		printf("candidates %d (villages + outposts within %d chunks): start/no-start + structure right %d (jigsawStructureAt, est. heights), %d "
+		       "(structureAt, chunk middle)\n",
+		       candTot, dumpRadius, candJig, candOld);
 		printf("starts %d: structure choice (exact xz, real heights) %d/%d\n", tot, stOk, tot);
-		printf("  with vanilla heights: identical piece lists %d/%d, identical building counts %d/%d\n", exactTrue, tot, catsTrue, tot);
-		printf("  with estimated heights: identical piece lists %d/%d, identical building counts %d/%d, same piece count %d/%d\n", exactEst, tot,
-		       catsEst, tot, countEst, tot);
+		printf("  with vanilla heights: identical piece lists %d/%d, identical ignoring y %d/%d, identical building counts %d/%d\n", exactTrue, tot,
+		       xzTrue, tot, catsTrue, tot);
+		printf("  with estimated heights: identical piece lists %d/%d, identical ignoring y %d/%d, identical building counts %d/%d, same piece "
+		       "count %d/%d\n",
+		       exactEst, tot, xzEst, tot, catsEst, tot, countEst, tot);
+		if (catPairs)
+			printf("  with estimated heights: per (start, category) count agreement %lld/%lld (%.1f%%); buildings %lld ours vs %lld vanilla, "
+			       "sum |diff| %lld\n",
+			       catPairsOk, catPairs, 100.0 * catPairsOk / catPairs, bEst, bVan, bAbs);
+		if (verbose)
+			for (auto& kv : catDiff) printf("    %-18s more in %d starts, fewer in %d\n", kv.first.c_str(), kv.second[0], kv.second[1]);
 		for (auto& kv : perType)
 			printf("    %-28s %3d starts: exact %3d (est. heights) %3d (vanilla heights)\n", kv.first.c_str(), kv.second[0], kv.second[1], kv.second[2]);
 		if (nh)
@@ -279,8 +420,19 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 		return exactTrue == tot ? 0 : 1;
 	}
 
-	if (cmd == "village-bench") {  // single thread: villages around the origin of N seeds
+	if (cmd == "village-bench") {  // single thread: villages around the origin of N seeds; --gpu M: GPU run checked against CPU
 		int N = argc > 3 ? atoi(argv[3]) : 50;
+		for (int i = 3; i + 1 < argc; i++)
+			if (std::string(argv[i]) == "--gpu") {
+#ifndef SW_CPU_ONLY
+				for (size_t k = 0; k < P.sets.size(); k++)
+					if (P.sets[k].name == "villages") return gpuCheck(P, T, H, (int)k, atoi(argv[i + 1])) ? 1 : 0;
+				return 2;
+#else
+				fprintf(stderr, "CPU-only build\n");
+				return 2;
+#endif
+			}
 		int vs = -1;
 		for (size_t i = 0; i < P.sets.size(); i++)
 			if (P.sets[i].name == "villages") vs = (int)i;
@@ -288,6 +440,7 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 		World* w = new World();
 		double tStart = 0, tLayout = 0;
 		long long nStart = 0, nVillage = 0, nPieces = 0, maxPieces = 0;
+		uint64_t hash = 1469598103934665603ULL;
 		std::map<std::string, int> cats;
 		for (int i = 0; i < N; i++) {
 			int64_t seed = (int64_t)mixStafford13(i + 777);
@@ -306,11 +459,17 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 					tLayout += now() - b;
 					nVillage++;
 					nPieces += n;
+					for (int k = 0; k < n; k++) {  // FNV-1a over the piece lists (regression check)
+						const Piece& q = buf[k];
+						int16_t f[10] = {q.elem, (int16_t)q.rot, q.x0, q.y0, q.z0, q.x1, q.y1, q.z1, (int16_t)q.depth, q.region};
+						for (int16_t v : f) hash = (hash ^ (uint16_t)v) * 1099511628211ULL;
+					}
 					maxPieces = std::max<long long>(maxPieces, n);
 				}
 		}
-		printf("%lld candidates: jigsawStructureAt %.1f us each; %lld villages: layout %.1f us each, %.1f pieces avg, max %lld\n", nStart,
-		       tStart / nStart * 1e6, nVillage, tLayout / std::max(1LL, nVillage) * 1e6, (double)nPieces / std::max(1LL, nVillage), maxPieces);
+		printf("%lld candidates: jigsawStructureAt %.1f us each; %lld villages: layout %.1f us each, %.1f pieces avg, max %lld (hash %016llx)\n",
+		       nStart, tStart / nStart * 1e6, nVillage, tLayout / std::max(1LL, nVillage) * 1e6, (double)nPieces / std::max(1LL, nVillage), maxPieces,
+		       (unsigned long long)hash);
 		delete w;
 		return 0;
 	}

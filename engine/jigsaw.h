@@ -21,7 +21,7 @@ namespace sw {
 enum {
 	JMAX_TEMPLATES = 2048, JMAX_JIGSAWS = 8192, JMAX_ELEMENTS = 4096, JMAX_SUBS = 256, JMAX_POOLS = 512, JMAX_ENTRIES = 8192,
 	JMAX_STRUCTS = 48, JMAX_CATS = 160,
-	JMAX_SHUFFLE = 1400,  // pool + fallback expanded (weighted) entries per connection
+	JMAX_SHUFFLE = 256,  // pool + fallback expanded (weighted) entries per connection (villages: <= 91)
 	JMAX_PJIG = 64,  // jigsaw blocks per template
 };
 
@@ -74,10 +74,11 @@ struct Piece {
 	int16_t elem;  // JigsawTables.elem index; JElem.tpl gives the template
 	uint8_t rot, depth;  // Rotation ordinal (NONE, CLOCKWISE_90, CLOCKWISE_180, COUNTERCLOCKWISE_90), jigsaw depth
 	int16_t x0, y0, z0, x1, y1, z1;
-	int16_t px, py, pz;  // template origin (PoolElementStructurePiece.position)
 	int16_t region;  // free-space shape the piece was carved from: 0 = the structure's, k = inside piece k-1
 	int16_t prio;  // placement priority of the connection that queued it (-32768 = not queued / done)
 };
+
+static_assert(sizeof(Piece) == 20, "Piece layout");
 
 struct HeightGrid {  // optional true heights (first free y, WORLD_SURFACE_WG), absolute coordinates
 	const int16_t* h;
@@ -361,6 +362,76 @@ HDN int jigsawStructureAt(const World& w, const PackDev& pk, const StructTables&
 
 // ---------------------------------------------------------------- layout
 
+// template origin (PoolElementStructurePiece.position) of a piece: its box min corner minus the element's box
+// min corner at origin 0 (the expansion hack only raises maxY)
+HDN void pieceOrigin(const JigsawTables& J, const Piece& p, int& px, int& py, int& pz) {
+	JBox b0 = elemBox(J, p.elem, 0, 0, 0, p.rot);
+	px = p.x0 - b0.x0;
+	py = p.y0 - b0.y0;
+	pz = p.z0 - b0.z0;
+}
+
+// RNG advance of Util.shuffle on n items without computing it: java.util.Random.nextInt(i) for i = n..2
+// (powers of two: one step; otherwise one step unless rejected: bits >= floor(2^31 / i) * i).
+HD void skipShuffle(JavaRandom& r, int n) {
+	for (int i = n; i > 1; i--) {
+		if ((i & -i) == i) {
+			r.next(31);
+			continue;
+		}
+		uint32_t lim = (0x80000000u / (uint32_t)i) * (uint32_t)i;
+		while ((uint32_t)r.next(31) >= lim) {
+		}
+	}
+}
+
+// the element whose jigsaw list an element uses (list: first member): its first J.jig index (-1 = feature's
+// synthetic jigsaw) and the count
+HDN int jigsawSource(const JigsawTables& J, int e, int& base0) {
+	const JElem& E = J.elem[e];
+	if (E.kind == JK_LIST) {
+		if (!E.nsub) {
+			base0 = 0;
+			return 0;
+		}
+		return jigsawSource(J, J.sub[E.sub0], base0);
+	}
+	if (E.kind == JK_FEATURE) {
+		base0 = -1;
+		return 1;
+	}
+	if (E.kind != JK_SINGLE) {
+		base0 = 0;
+		return 0;
+	}
+	base0 = J.tpl[E.tpl].j0;
+	return J.tpl[E.tpl].nj;
+}
+
+// Placer: target box for connecting target jigsaw tj (at rotation tr, positioned at ZERO) to source jigsaw sj
+HDN void connectBox(const World& w, const PackDev& pk, const HeightGrid* g, const JigsawTables& J, int te, int tr, const JPlaced& tj, const JPlaced& sj,
+                    int tx, int ty, int tz, int fy, int srcLocalY, bool bothRigid, int srcBoxY, int expandTo, int ox, int oz, int& baseH, JBox& bb,
+                    int& rpy) {
+	int rpx = tx - tj.x, rpz = tz - tj.z;
+	rpy = ty - tj.y;
+	bb = elemBox(J, te, rpx, rpy, rpz, tr);
+	int deltaY = srcLocalY - tj.y + fy;
+	int tBoxY;
+	if (bothRigid) tBoxY = srcBoxY + deltaY;
+	else {
+		if (baseH == HEIGHT_UNKNOWN) baseH = jigsawHeight(w, pk, g, sj.x + ox, sj.z + oz);
+		tBoxY = baseH - tj.y;
+	}
+	int yo = tBoxY - bb.y0;
+	bb.y0 += yo;
+	bb.y1 += yo;
+	rpy += yo;
+	if (expandTo > 0) {
+		int ns = expandTo + 1 > bb.y1 - bb.y0 ? expandTo + 1 : bb.y1 - bb.y0;
+		if (bb.y0 + ns > bb.y1) bb.y1 = bb.y0 + ns;
+	}
+}
+
 // Fits = vanilla's !joinIsNotEmpty(free, box.deflate(0.25), ONLY_SECOND): every block of the box lies in the
 // free shape. Shape `region` is its base box minus every piece carved from it (pieces with that region).
 HDN bool jFits(const Piece* pc, int n, const JBox& base, int region, const JBox& b) {
@@ -377,7 +448,7 @@ HDN bool jFits(const Piece* pc, int n, const JBox& base, int region, const JBox&
 // Returns the number of pieces written to out (vanilla order: start piece first, then placement order),
 // 0 = no structure (empty start element / unsupported), -1 = more than maxOut pieces.
 // Does not re-check the biome: pick the structure with jigsawStructureAt / structureAt first.
-// Device stack use: ~3.5 KB + maxOut * sizeof(Piece) (28 B).
+// Device stack use: ~2.5 KB (+ ~2 KB for the height estimate) + the caller's maxOut * sizeof(Piece) (20 B); villages reach ~280 pieces.
 HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, int structureIndex, int chunkX, int chunkZ, Piece* out, int maxOut,
                      const HeightGrid* g = nullptr) {
 	int js = structureIndex >= 0 && structureIndex < MAX_STRUCTS ? J.structOf[structureIndex] : -1;
@@ -396,7 +467,6 @@ HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, i
 		c.depth = 0;
 		c.x0 = (int16_t)(s.box.x0 - ox); c.y0 = (int16_t)s.box.y0; c.z0 = (int16_t)(s.box.z0 - oz);
 		c.x1 = (int16_t)(s.box.x1 - ox); c.y1 = (int16_t)s.box.y1; c.z1 = (int16_t)(s.box.z1 - oz);
-		c.px = (int16_t)(s.px - ox); c.py = (int16_t)s.py; c.pz = (int16_t)(s.pz - oz);
 		c.region = 0;  // the AABB shape is built minus the start box
 		c.prio = -32768;
 	}
@@ -431,8 +501,10 @@ HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, i
 		const JElem& SE = J.elem[src.elem];
 		bool srcRigid = SE.rigid;
 		int nsj = shuffledJigsaws(J, src.elem, r, srcJ);
+		int spx, spy, spz;
+		pieceOrigin(J, src, spx, spy, spz);
 		for (int a = 0; a < nsj; a++) {
-			JPlaced sj = placeJig(J, srcJ[a], src.px, src.py, src.pz, src.rot);
+			JPlaced sj = placeJig(J, srcJ[a], spx, spy, spz, src.rot);
 			int fx, fy, fz;
 			dirVec(sj.front, fx, fy, fz);
 			int tx = sj.x + fx, ty = sj.y + fy, tz = sj.z + fz;
@@ -469,11 +541,41 @@ HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, i
 				list[nl + k] = t;
 			}
 			nl += FP.n;
+			// Vanilla tries each candidate element in 4 shuffled rotations, each with its shuffled jigsaw list, and
+			// takes the first (rotation, jigsaw) that attaches and fits. Which ones fit doesn't depend on the order,
+			// so fits are worked out first and the shuffles are only materialized where the order decides the
+			// result; elsewhere the RNG is just advanced by the same calls (skipShuffle). Elements that failed
+			// once at this connection fail again (the free shape only changes on success).
+			int failed[32], nfailed = 0;
 			bool placed = false;
 			for (int li = 0; li < nl && !placed; li++) {
 				int te = list[li];
 				const JElem& TE = J.elem[te];
 				if (TE.kind == JK_EMPTY) break;
+				int base0, cnt = jigsawSource(J, te, base0);
+				bool known = false;
+				for (int k = 0; k < nfailed && !known; k++) known = failed[k] == te;
+				uint64_t mask[4] = {0, 0, 0, 0};
+				if (!known) {
+					bool tgtRigid = TE.rigid;
+					int expandTo0 = S.expansion;
+					for (int tr = 0; tr < 4; tr++)
+						for (int k = 0; k < cnt; k++) {
+							JPlaced tj = placeJig(J, base0 < 0 ? -1 : base0 + k, 0, 0, 0, tr);
+							if (!canAttach(sj, tj)) continue;
+							JBox bb;
+							int rpy;
+							connectBox(w, pk, g, J, te, tr, tj, sj, tx, ty, tz, fy, srcLocalY, srcRigid && tgtRigid, src.y0, expandTo0 ? TE.expand[tr] : 0, ox,
+							           oz, baseH, bb, rpy);
+							if (jFits(out, n, base, region, bb)) mask[tr] |= 1ULL << k;
+						}
+				}
+				if (known || (mask[0] | mask[1] | mask[2] | mask[3]) == 0) {
+					skipShuffle(r, 4);  // Rotation.getShuffled
+					for (int i = 0; i < 4; i++) skipShuffle(r, base0 < 0 ? 0 : cnt);  // per rotation: getShuffledJigsawBlocks
+					if (!known && nfailed < 32) failed[nfailed++] = te;
+					continue;
+				}
 				int rots[4] = {0, 1, 2, 3};  // Rotation.getShuffled
 				for (int i = 4; i > 1; i--) {
 					int k = r.nextInt(i);
@@ -483,30 +585,19 @@ HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, i
 				}
 				for (int ri = 0; ri < 4 && !placed; ri++) {
 					int tr = rots[ri];
+					if (!mask[tr]) {
+						skipShuffle(r, base0 < 0 ? 0 : cnt);
+						continue;
+					}
 					int ntj = shuffledJigsaws(J, te, r, tgtJ);
-					int expandTo = S.expansion ? TE.expand[tr] : 0;
 					for (int b = 0; b < ntj; b++) {
+						int k = tgtJ[b] < 0 ? 0 : tgtJ[b] - base0;
+						if (!((mask[tr] >> k) & 1)) continue;
 						JPlaced tj = placeJig(J, tgtJ[b], 0, 0, 0, tr);
-						if (!canAttach(sj, tj)) continue;
-						int rpx = tx - tj.x, rpy = ty - tj.y, rpz = tz - tj.z;
-						JBox bb = elemBox(J, te, rpx, rpy, rpz, tr);
-						bool tgtRigid = TE.rigid;
-						int deltaY = srcLocalY - tj.y + fy;
-						int tBoxY;
-						if (srcRigid && tgtRigid) tBoxY = src.y0 + deltaY;
-						else {
-							if (baseH == HEIGHT_UNKNOWN) baseH = jigsawHeight(w, pk, g, sj.x + ox, sj.z + oz);
-							tBoxY = baseH - tj.y;
-						}
-						int yo = tBoxY - bb.y0;
-						bb.y0 += yo;
-						bb.y1 += yo;
-						rpy += yo;
-						if (expandTo > 0) {
-							int ns = expandTo + 1 > bb.y1 - bb.y0 ? expandTo + 1 : bb.y1 - bb.y0;
-							if (bb.y0 + ns > bb.y1) bb.y1 = bb.y0 + ns;
-						}
-						if (!jFits(out, n, base, region, bb)) continue;
+						JBox bb;
+						int rpy;
+						connectBox(w, pk, g, J, te, tr, tj, sj, tx, ty, tz, fy, srcLocalY, srcRigid && TE.rigid, src.y0, S.expansion ? TE.expand[tr] : 0, ox, oz,
+						           baseH, bb, rpy);
 						if (n >= maxOut) return -1;
 						Piece& p = out[n++];
 						p.elem = (int16_t)te;
@@ -514,7 +605,6 @@ HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, i
 						p.depth = (uint8_t)(depth + 1);
 						p.x0 = (int16_t)bb.x0; p.y0 = (int16_t)bb.y0; p.z0 = (int16_t)bb.z0;
 						p.x1 = (int16_t)bb.x1; p.y1 = (int16_t)bb.y1; p.z1 = (int16_t)bb.z1;
-						p.px = (int16_t)rpx; p.py = (int16_t)rpy; p.pz = (int16_t)rpz;
 						p.region = (int16_t)region;
 						p.prio = depth + 1 <= S.maxDepth ? (int16_t)sj.placement : (int16_t)-32768;
 						placed = true;
@@ -542,6 +632,11 @@ HDN int countCategory(const JigsawTables& J, const Piece* p, int n, int cat) {
 	int c = 0;
 	for (int i = 0; i < n; i++) c += pieceCategory(J, p[i]) == cat;
 	return c;
+}
+// world coordinates of a piece's box (minX, minY, minZ, maxX, maxY, maxZ)
+HD void pieceBoxAbs(const Piece& p, int chunkX, int chunkZ, int* b) {
+	b[0] = p.x0 + (chunkX << 4); b[1] = p.y0; b[2] = p.z0 + (chunkZ << 4);
+	b[3] = p.x1 + (chunkX << 4); b[4] = p.y1; b[5] = p.z1 + (chunkZ << 4);
 }
 
 // ---------------------------------------------------------------- host: tables + building categories
@@ -742,6 +837,7 @@ inline JigsawHost buildJigsaw(const Pack& P) {
 			const JTpl& T = J.tpl[E.tpl];
 			for (int k = 0; k < T.nj; k++) {
 				int p = J.jig[T.j0 + k].pool;
+				if (p >= 0 && (int)J.pool[p].n + J.pool[J.pool[p].fallback].n > JMAX_SHUFFLE) d.supported = 0;  // list[] in jigsawLayout
 				if (p >= 0 && !seenP[p]) {
 					seenP[p] = 1;
 					q.push_back(p);
@@ -750,7 +846,6 @@ inline JigsawHost buildJigsaw(const Pack& P) {
 		};
 		for (size_t k = 0; k < q.size(); k++) {
 			const JPool& Q = J.pool[q[k]];
-			if ((int)Q.n + J.pool[Q.fallback].n > JMAX_SHUFFLE) d.supported = 0;
 			for (int x = 0; x < Q.n; x++) addElem(J.ent[Q.e0 + x]);
 			int f = I.pools[q[k]].fallback;
 			if (f >= 0 && !seenP[f]) {
