@@ -1,0 +1,321 @@
+// Debug CLI for jigsaw layouts (dispatched from main.cu for every command starting with "village"):
+//   seedwright <pack> village <seed> <blockX> <blockZ> [--heights villages-file]   pieces + building counts
+//   seedwright <pack> village-categories                                           "piece <structure> <category>"
+//   seedwright <pack> village-verify <villages-file...>                            compare with oracle dumps
+//   seedwright <pack> village-bench [N]                                            single-thread cost per village
+#pragma once
+#include "jigsaw.h"
+#include <chrono>
+#include <cstdio>
+#include <fstream>
+#include <map>
+#include <set>
+#include <sstream>
+
+namespace sw {
+
+namespace jcli {
+
+inline double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+inline std::string shortName(const std::string& n) { return n.substr(n.find(':') + 1); }
+
+// one start from an oracle villages-<seed>.txt
+struct OracleStart {
+	std::string structure;
+	int cx = 0, cz = 0;
+	std::vector<std::string> elem;
+	std::vector<int> rot;
+	std::vector<std::array<int, 6>> box;
+	int hx0 = 0, hz0 = 0, hnx = 0, hnz = 0;
+	std::vector<int16_t> heights;
+	HeightGrid grid() const { return HeightGrid{heights.data(), hx0, hz0, hnx, hnz}; }
+};
+
+inline bool readOracle(const std::string& path, int64_t& seed, std::vector<OracleStart>& out) {
+	std::ifstream in(path);
+	if (!in) return false;
+	std::string k;
+	in >> k >> seed;
+	while (in >> k) {
+		if (k == "end") break;
+		if (k != "structure") return false;
+		OracleStart s;
+		int n;
+		in >> s.structure >> s.cx >> s.cz >> n;
+		for (int i = 0; i < n; i++) {
+			std::string e, r;
+			std::array<int, 6> b;
+			in >> e >> r;
+			for (int& v : b) in >> v;
+			s.elem.push_back(e);
+			s.rot.push_back(r == "?" ? -1 : std::stoi(r));
+			s.box.push_back(b);
+		}
+		in >> k >> s.hx0 >> s.hz0 >> s.hnx >> s.hnz;
+		s.heights.resize((size_t)s.hnx * s.hnz);
+		for (auto& h : s.heights) {
+			std::string t;
+			in >> t;
+			h = t == "-" ? (int16_t)HEIGHT_UNKNOWN : (int16_t)std::stoi(t);
+		}
+		out.push_back(std::move(s));
+	}
+	return true;
+}
+
+inline int setOf(const Pack& P, int st) {
+	for (size_t i = 0; i < P.sets.size(); i++)
+		for (int s : P.sets[i].structs)
+			if (s == st) return (int)i;
+	return -1;
+}
+
+inline std::string pieceDesc(const Pack& P, const Piece& p, int ox, int oz) {
+	char b[160];
+	snprintf(b, sizeof b, "%d %d %d %d %d %d", p.x0 + ox, p.y0, p.z0 + oz, p.x1 + ox, p.y1, p.z1 + oz);
+	return elementName(P, p.elem) + " " + std::to_string(p.rot) + " " + b;
+}
+
+inline std::map<std::string, int> categoryCounts(const JigsawHost& H, const Piece* p, int n) {
+	std::map<std::string, int> m;
+	for (int i = 0; i < n; i++) {
+		int c = pieceCategory(*H.t, p[i]);
+		if (c >= 0) m[H.categories[c]]++;
+	}
+	return m;
+}
+inline std::map<std::string, int> categoryCounts(const OracleStart& s) {
+	std::map<std::string, int> m;
+	for (auto& e : s.elem) {
+		std::string c = templateCategory(e);
+		if (!c.empty()) m[c]++;
+	}
+	return m;
+}
+
+enum { CLI_MAX_PIECES = 1024 };
+
+}  // namespace jcli
+
+inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** argv) {
+	using namespace jcli;
+	std::string cmd = argv[2];
+	JigsawHost H;
+	try {
+		H = buildJigsaw(P);
+	} catch (std::exception& e) {
+		fprintf(stderr, "%s\n", e.what());
+		return 2;
+	}
+	if (!H.t) {
+		fprintf(stderr, "%s\n", H.error.c_str());
+		return 2;
+	}
+	const JigsawTables& J = *H.t;
+	const PackDev& pk = *P.dev;
+
+	if (cmd == "village-categories") {  // building categories each jigsaw structure can contain
+		for (size_t st = 0; st < P.structures.size(); st++) {
+			if (st >= MAX_STRUCTS || J.structOf[st] < 0) continue;
+			for (auto& c : jigsawCategories(H, (int)st)) printf("piece %s %s\n", shortName(P.structures[st].name).c_str(), c.c_str());
+		}
+		return 0;
+	}
+
+	std::vector<Piece> buf(CLI_MAX_PIECES);
+	if (cmd == "village") {
+		if (argc < 6) {
+			fprintf(stderr, "usage: seedwright <pack> village <seed> <blockX> <blockZ> [--heights villages-file]\n");
+			return 2;
+		}
+		int64_t seed = std::stoll(argv[3]);
+		int bx = std::stoi(argv[4]), bz = std::stoi(argv[5]);
+		int cx = bx >> 4, cz = bz >> 4;
+		std::vector<OracleStart> oracle;
+		const HeightGrid* grid = nullptr;
+		HeightGrid hg;
+		for (int i = 6; i + 1 < argc; i++)
+			if (std::string(argv[i]) == "--heights") {
+				int64_t os;
+				if (!readOracle(argv[i + 1], os, oracle)) {
+					fprintf(stderr, "cannot read %s\n", argv[i + 1]);
+					return 2;
+				}
+				for (auto& s : oracle)
+					if (s.cx == cx && s.cz == cz) {
+						hg = s.grid();
+						grid = &hg;
+					}
+				if (!grid) fprintf(stderr, "(no oracle start at chunk %d %d in %s: using the height estimate)\n", cx, cz, argv[i + 1]);
+			}
+		World* w = new World();
+		worldInit(*w, pk, seed);
+		int found = 0;
+		for (int si = 0; si < T.nsets; si++) {
+			bool jig = false;
+			for (int k = 0; k < T.sets[si].nstructs; k++) jig |= J.structOf[T.sets[si].structs[k]] >= 0;
+			if (!jig || T.sets[si].type != SET_SPREAD || !isStructureChunk(T, si, (uint64_t)seed, cx, cz)) continue;
+			int stOld = structureAt(*w, pk, T, si, cx, cz);
+			int st = jigsawStructureAt(*w, pk, T, J, si, cx, cz, grid);
+			printf("set %s chunk %d %d: start %s (chunk-middle check: %s)\n", P.sets[si].name.c_str(), cx, cz,
+			       st >= 0 ? P.structures[st].name.c_str() : "none", stOld >= 0 ? P.structures[stOld].name.c_str() : "none");
+			if (st < 0) continue;
+			int n = jigsawLayout(*w, pk, J, st, cx, cz, buf.data(), (int)buf.size(), grid);
+			if (n < 0) {
+				printf("  more than %d pieces\n", (int)buf.size());
+				continue;
+			}
+			found++;
+			printf("pieces %d\n", n);
+			for (int i = 0; i < n; i++) printf("  %3d d%d %s\n", i, buf[i].depth, pieceDesc(P, buf[i], cx << 4, cz << 4).c_str());
+			printf("buildings:");
+			for (auto& kv : categoryCounts(H, buf.data(), n)) printf(" %s=%d", kv.first.c_str(), kv.second);
+			printf("\n");
+		}
+		if (!found) printf("no jigsaw structure starts at chunk %d %d\n", cx, cz);
+		delete w;
+		return 0;
+	}
+
+	if (cmd == "village-verify") {
+		// per start: structure choice, piece list with the estimated heights, piece list with vanilla's heights
+		int tot = 0, stOk = 0, exactEst = 0, catsEst = 0, exactTrue = 0, catsTrue = 0, countEst = 0;
+		long long dh = 0, dh2 = 0, nh = 0, nhBad = 0;
+		std::map<std::string, std::array<int, 3>> perType;  // starts, exact (est), exact (true heights)
+		bool verbose = getenv("SW_VERBOSE") != nullptr;
+		for (int f = 3; f < argc; f++) {
+			int64_t seed;
+			std::vector<OracleStart> starts;
+			if (!readOracle(argv[f], seed, starts)) {
+				fprintf(stderr, "cannot read %s\n", argv[f]);
+				return 2;
+			}
+			World* w = new World();
+			worldInit(*w, pk, seed);
+			printf("== %s (seed %lld): %zu starts\n", argv[f], (long long)seed, starts.size());
+			for (auto& s : starts) {
+				auto it = P.structureIndex.find(s.structure);
+				if (it == P.structureIndex.end()) continue;
+				int st = it->second, si = setOf(P, st);
+				tot++;
+				HeightGrid g = s.grid();
+				// height estimate quality on this footprint
+				for (int k = 0; k < s.hnz; k += 4)
+					for (int i = 0; i < s.hnx; i += 4) {
+						int h = s.heights[(size_t)k * s.hnx + i];
+						if (h == HEIGHT_UNKNOWN) continue;
+						int e = estimateSurfaceY(*w, pk, s.hx0 + i, s.hz0 + k);
+						dh += e - h;
+						dh2 += (long long)(e - h) * (e - h);
+						nh++;
+						nhBad += std::abs(e - h) > 4;
+					}
+				int pick = si >= 0 ? jigsawStructureAt(*w, pk, T, J, si, s.cx, s.cz, &g) : -1;
+				bool pickOk = pick == st;
+				stOk += pickOk;
+				std::multiset<std::string> want;
+				for (size_t i = 0; i < s.elem.size(); i++) {
+					char b[128];
+					snprintf(b, sizeof b, " %d %d %d %d %d %d %d", s.rot[i], s.box[i][0], s.box[i][1], s.box[i][2], s.box[i][3], s.box[i][4], s.box[i][5]);
+					want.insert(s.elem[i] + b);
+				}
+				auto wantCats = categoryCounts(s);
+				auto& pt = perType[s.structure];
+				pt[0]++;
+				for (int mode = 0; mode < 2; mode++) {
+					int n = jigsawLayout(*w, pk, J, st, s.cx, s.cz, buf.data(), (int)buf.size(), mode ? &g : nullptr);
+					std::multiset<std::string> got;
+					for (int i = 0; i < n; i++) got.insert(pieceDesc(P, buf[i], s.cx << 4, s.cz << 4));
+					bool exact = got == want;
+					bool cats = n > 0 && categoryCounts(H, buf.data(), n) == wantCats;
+					if (mode == 0) {
+						exactEst += exact;
+						catsEst += cats;
+						countEst += n == (int)s.elem.size();
+						pt[1] += exact;
+					} else {
+						exactTrue += exact;
+						catsTrue += cats;
+						pt[2] += exact;
+					}
+					if (!exact && (mode == 1 || verbose)) {
+						printf("  %s %s %d %d: %s heights: %d pieces vs vanilla %zu%s\n", mode ? "MISMATCH" : "diff", s.structure.c_str(), s.cx, s.cz,
+						       mode ? "vanilla" : "estimated", n, s.elem.size(), pickOk ? "" : " (structure choice differs too)");
+						if (mode == 1 || verbose) {
+							// first differing piece in vanilla order
+							for (int i = 0; i < n && i < (int)s.elem.size(); i++) {
+								std::string a = pieceDesc(P, buf[i], s.cx << 4, s.cz << 4);
+								char b[128];
+								snprintf(b, sizeof b, " %d %d %d %d %d %d %d", s.rot[i], s.box[i][0], s.box[i][1], s.box[i][2], s.box[i][3], s.box[i][4],
+								         s.box[i][5]);
+								if (a != s.elem[i] + b) {
+									printf("    first difference at piece %d: got %s | want %s%s\n", i, a.c_str(), s.elem[i].c_str(), b);
+									break;
+								}
+							}
+						}
+					}
+					if (mode == 0 && verbose) {
+						printf("    buildings est:");
+						for (auto& kv : categoryCounts(H, buf.data(), n)) printf(" %s=%d", kv.first.c_str(), kv.second);
+						printf("\n    buildings van:");
+						for (auto& kv : wantCats) printf(" %s=%d", kv.first.c_str(), kv.second);
+						printf("\n");
+					}
+				}
+			}
+			delete w;
+		}
+		printf("starts %d: structure choice (exact xz, real heights) %d/%d\n", tot, stOk, tot);
+		printf("  with vanilla heights: identical piece lists %d/%d, identical building counts %d/%d\n", exactTrue, tot, catsTrue, tot);
+		printf("  with estimated heights: identical piece lists %d/%d, identical building counts %d/%d, same piece count %d/%d\n", exactEst, tot,
+		       catsEst, tot, countEst, tot);
+		for (auto& kv : perType)
+			printf("    %-28s %3d starts: exact %3d (est. heights) %3d (vanilla heights)\n", kv.first.c_str(), kv.second[0], kv.second[1], kv.second[2]);
+		if (nh)
+			printf("  height estimate on piece footprints: mean error %+.2f, rms %.2f, |err| > 4 in %.1f%% of %lld columns\n", (double)dh / nh,
+			       sqrt((double)dh2 / nh), 100.0 * nhBad / nh, nh);
+		return exactTrue == tot ? 0 : 1;
+	}
+
+	if (cmd == "village-bench") {  // single thread: villages around the origin of N seeds
+		int N = argc > 3 ? atoi(argv[3]) : 50;
+		int vs = -1;
+		for (size_t i = 0; i < P.sets.size(); i++)
+			if (P.sets[i].name == "villages") vs = (int)i;
+		if (vs < 0) return 2;
+		World* w = new World();
+		double tStart = 0, tLayout = 0;
+		long long nStart = 0, nVillage = 0, nPieces = 0, maxPieces = 0;
+		std::map<std::string, int> cats;
+		for (int i = 0; i < N; i++) {
+			int64_t seed = (int64_t)mixStafford13(i + 777);
+			worldInit(*w, pk, seed);
+			for (int rx = -2; rx <= 1; rx++)
+				for (int rz = -2; rz <= 1; rz++) {
+					int px, pz;
+					spreadCandidate(T.sets[vs].spread, (uint64_t)seed, rx, rz, px, pz);
+					double a = now();
+					int st = jigsawStructureAt(*w, pk, T, J, vs, px, pz);
+					double b = now();
+					tStart += b - a;
+					nStart++;
+					if (st < 0) continue;
+					int n = jigsawLayout(*w, pk, J, st, px, pz, buf.data(), (int)buf.size());
+					tLayout += now() - b;
+					nVillage++;
+					nPieces += n;
+					maxPieces = std::max<long long>(maxPieces, n);
+				}
+		}
+		printf("%lld candidates: jigsawStructureAt %.1f us each; %lld villages: layout %.1f us each, %.1f pieces avg, max %lld\n", nStart,
+		       tStart / nStart * 1e6, nVillage, tLayout / std::max(1LL, nVillage) * 1e6, (double)nPieces / std::max(1LL, nVillage), maxPieces);
+		delete w;
+		return 0;
+	}
+	fprintf(stderr, "unknown command %s\n", cmd.c_str());
+	return 2;
+}
+
+}  // namespace sw

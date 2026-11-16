@@ -24,5 +24,7 @@ for seed in "$@"; do
 	"$root/gradlew" -p "$root" runServer "${extra[@]}" -Poracle="$opts" --args=nogui --console=plain > "$root/run-server-$seed.log" 2>&1 || true
 	f=$(ls -t "$root"/run/oracle-*.txt 2>/dev/null | head -1)
 	[[ -n "$f" ]] && mv -f "$f" "$out/" && echo "ok $seed"
+	f=$(ls -t "$root"/run/villages-*.txt 2>/dev/null | head -1 || true)  # only with villages=R in the options
+	[[ -n "$f" ]] && mv -f "$f" "$out/" && echo "ok $seed villages"
 	cp -f "$root/run/biome_parameters.txt" "$out/" 2>/dev/null || true
 done

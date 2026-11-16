@@ -2,6 +2,7 @@
 #include "pack.h"
 #include "structures.h"
 #include "query.h"
+#include "jigsaw_cli.h"
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -494,6 +495,7 @@ int main(int argc, char** argv) {
 	StructTables T = buildTables(P);
 	std::string cmd = argv[2];
 	if (cmd == "verify") return verify(P, T, std::vector<std::string>(argv + 3, argv + argc));
+	if (cmd.rfind("village", 0) == 0) return jigsawCommand(P, T, argc, argv);  // village, village-categories, village-verify, village-bench
 	if (cmd == "list") {  // machine-readable names for front ends: "set NAME", "structure SET NAME", "biome NAME"
 		for (auto& s : P.sets) {
 			printf("set %s\n", s.name.c_str());

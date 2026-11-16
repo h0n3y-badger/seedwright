@@ -54,8 +54,43 @@ struct StructureSetInfo {
 	std::vector<int> structs, weights;
 };
 
+// Jigsaw data (pack section "jigsaw", appended by tools/extract.py; absent in older packs). Indices refer to
+// the vectors below; -1 = none / non-existent pool. See engine/jigsaw.h for the device tables.
+struct JigsawJigInfo {
+	int x, y, z, front, top, joint;  // template-local pos; Direction index (down up north south west east); joint 0 rollable 1 aligned
+	int name, target, pool, placement, selection;
+};
+struct JigsawTemplateInfo {
+	std::string name;
+	int sx = 0, sy = 0, sz = 0;
+	std::vector<JigsawJigInfo> jig;  // palette order (y, x, z)
+};
+struct JigsawElementInfo {
+	std::string kind, proj, arg;  // kind single|legacy|feature|list|empty; arg = template index / feature id
+	std::vector<int> subs;  // list members (element indices)
+};
+struct JigsawPoolInfo {
+	std::string name;
+	int fallback = -1, maxSize = 0;
+	std::vector<std::pair<int, int>> entries;  // (element, weight)
+};
+struct JigsawStructureInfo {
+	std::string name, heightKind, project;
+	int startPool = -1, startJigsaw = -1, size = 0, maxH = 0, maxV = 0, h0 = 0, h1 = 0, expansion = 0, padBottom = 0, padTop = 0, aliases = 0;
+};
+struct JigsawPackInfo {
+	bool present = false;
+	std::string featureName;  // FeaturePoolElement jigsaw name ("*" = null, matches any target: 26.3+)
+	std::vector<std::string> names;
+	std::vector<JigsawTemplateInfo> templates;
+	std::vector<JigsawElementInfo> elements;
+	std::vector<JigsawPoolInfo> pools;
+	std::vector<JigsawStructureInfo> structures;
+};
+
 struct Pack {
 	std::string version;
+	JigsawPackInfo jigsaw;
 	std::vector<std::string> biomes;
 	std::map<std::string, int> biomeIndex;
 	std::vector<StructureInfo> structures;
@@ -513,6 +548,63 @@ inline Pack loadPack(const std::string& path) {
 	for (auto& s : P.sets)
 		for (size_t j = 0; j < P.sets.size(); j++)
 			if ("minecraft:" + s.exclusionSet.substr(s.exclusionSet.find(':') + 1) == "minecraft:" + P.sets[j].name) s.exclusionIndex = (int)j;
+	// optional trailing jigsaw section (packs from before it existed simply end here)
+	if (std::getline(in, line) && line.rfind("jigsaw ", 0) == 0) {
+		JigsawPackInfo& J = P.jigsaw;
+		{
+			std::istringstream ss(line);
+			std::string k;
+			int ver;
+			ss >> k >> ver >> J.featureName;
+		}
+		int n = header("jigsaw_names");
+		for (int i = 0; i < n; i++) {
+			std::getline(in, line);
+			J.names.push_back(line);
+		}
+		n = header("jigsaw_templates");
+		for (int i = 0; i < n; i++) {
+			auto ss = next();
+			JigsawTemplateInfo t;
+			int nj;
+			ss >> t.name >> t.sx >> t.sy >> t.sz >> nj;
+			for (int j = 0; j < nj; j++) {
+				JigsawJigInfo g;
+				ss >> g.x >> g.y >> g.z >> g.front >> g.top >> g.joint >> g.name >> g.target >> g.pool >> g.placement >> g.selection;
+				t.jig.push_back(g);
+			}
+			J.templates.push_back(t);
+		}
+		n = header("jigsaw_elements");
+		for (int i = 0; i < n; i++) {
+			auto ss = next();
+			JigsawElementInfo e;
+			int ns;
+			ss >> e.kind >> e.proj >> e.arg >> ns;
+			e.subs.resize(ns);
+			for (auto& x : e.subs) ss >> x;
+			J.elements.push_back(e);
+		}
+		n = header("jigsaw_pools");
+		for (int i = 0; i < n; i++) {
+			auto ss = next();
+			JigsawPoolInfo p;
+			int ne;
+			ss >> p.name >> p.fallback >> p.maxSize >> ne;
+			p.entries.resize(ne);
+			for (auto& e : p.entries) ss >> e.first >> e.second;
+			J.pools.push_back(p);
+		}
+		n = header("jigsaw_structures");
+		for (int i = 0; i < n; i++) {
+			auto ss = next();
+			JigsawStructureInfo s;
+			ss >> s.name >> s.startPool >> s.startJigsaw >> s.size >> s.maxH >> s.maxV >> s.heightKind >> s.h0 >> s.h1 >> s.project >> s.expansion >>
+				s.padBottom >> s.padTop >> s.aliases;
+			J.structures.push_back(s);
+		}
+		J.present = true;
+	}
 	return P;
 }
 

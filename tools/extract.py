@@ -219,6 +219,228 @@ def structure_entry(jar, name):
     e['y'] = y
     return e
 
+# ---------------- jigsaw structures (template pools + structure templates) ----------------
+
+def read_nbt(data):
+    """Minimal NBT reader (gzip'd or raw) -> python dicts/lists."""
+    import gzip
+    if data[:2] == b'\x1f\x8b':
+        data = gzip.decompress(data)
+    pos = 0
+
+    def rd(fmt):
+        nonlocal pos
+        v = struct.unpack_from('>' + fmt, data, pos)
+        pos += struct.calcsize('>' + fmt)
+        return v[0]
+
+    def rstr():
+        nonlocal pos
+        n = rd('H')
+        s = data[pos:pos + n].decode('utf-8', 'replace')
+        pos += n
+        return s
+
+    def payload(t):
+        nonlocal pos
+        if t in (1, 2, 3, 4, 5, 6):
+            return rd(' bhiqfd'[t])
+        if t == 7:
+            n = rd('i')
+            pos += n
+            return None
+        if t == 8:
+            return rstr()
+        if t == 9:
+            et = rd('b')
+            n = rd('i')
+            return [payload(et) for _ in range(n)]
+        if t == 10:
+            d = {}
+            while True:
+                tt = rd('b')
+                if tt == 0:
+                    return d
+                k = rstr()
+                d[k] = payload(tt)
+        if t in (11, 12):
+            n = rd('i')
+            return [rd('i' if t == 11 else 'q') for _ in range(n)]
+        raise ValueError(f'nbt tag {t}')
+
+    t = rd('b')
+    rstr()
+    return payload(t)
+
+DIRS = ['down', 'up', 'north', 'south', 'west', 'east']  # net.minecraft.core.Direction order
+
+def ns(ident):
+    return ident if ':' in ident else 'minecraft:' + ident
+
+def jigsaw_section(jar, version, jigsaw_structs):
+    """Template pools, element table and per-template jigsaw blocks for every jigsaw structure.
+
+    Template jigsaw order = StructureTemplate's palette block order for block-entity blocks: sorted by
+    (y, x, z). FeaturePoolElement's synthetic jigsaw: name "minecraft:bottom" up to 26.2, null (matches any
+    target) in 26.3."""
+    names, name_idx = [], {}
+
+    def nid(s):
+        if s not in name_idx:
+            name_idx[s] = len(names)
+            names.append(s)
+        return name_idx[s]
+
+    pool_json = {}
+    for p in jar.list('worldgen/template_pool'):
+        pool_json['minecraft:' + p] = jar.json('worldgen/template_pool', 'minecraft:' + p)
+    pools, pool_idx = [], {}
+    templates, tpl_idx = [], {}
+    elements = []
+    queue = []
+
+    def pool_ref(name):
+        name = ns(name)
+        if name not in pool_json:
+            return -1
+        if name not in pool_idx:
+            pool_idx[name] = len(pools)
+            pools.append({'name': name})
+            queue.append(name)
+        return pool_idx[name]
+
+    def template(loc):
+        loc = ns(loc)
+        if loc in tpl_idx:
+            return tpl_idx[loc]
+        nsp, _, path = loc.partition(':')
+        fn = f'data/{nsp}/structure/{path}.nbt'
+        # a missing template is an empty one in vanilla (StructureTemplateManager.getOrCreate): size 0, no blocks
+        d = read_nbt(jar.z.read(fn)) if fn in jar.names else {'size': [0, 0, 0], 'blocks': [], 'palette': []}
+        pals = d['palettes'] if 'palettes' in d else [d['palette']]
+        jig = []
+        for b in d['blocks']:
+            s = pals[0][b['state']]
+            if s.get('Name', s.get('id')) != 'minecraft:jigsaw':
+                continue
+            props = s.get('Properties', s.get('properties', {}))
+            front, top = props['orientation'].split('_')
+            nbt = b.get('nbt', {})
+            # StructureTemplate.getDefaultJointType: horizontal front -> aligned, vertical -> rollable
+            joint = nbt.get('joint', 'aligned' if front not in ('up', 'down') else 'rollable')
+            jig.append((b['pos'][1], b['pos'][0], b['pos'][2], DIRS.index(front), DIRS.index(top), joint,
+                        ns(nbt.get('name', 'minecraft:empty')), ns(nbt.get('target', 'minecraft:empty')),
+                        ns(nbt.get('pool', 'minecraft:empty')), nbt.get('placement_priority', 0), nbt.get('selection_priority', 0)))
+        if len(pals) > 1:  # palette choice depends on position; fine as long as the jigsaws agree
+            for pal in pals[1:]:
+                other = [b['pos'] for b in d['blocks'] if pal[b['state']].get('Name', pal[b['state']].get('id')) == 'minecraft:jigsaw']
+                assert len(other) == len(jig), f'{loc}: palettes disagree on jigsaws'
+        jig.sort(key=lambda j: (j[0], j[1], j[2]))  # buildInfoList comparator: y, x, z
+        for j in jig:
+            pool_ref(j[8])
+        tpl_idx[loc] = len(templates)
+        templates.append({'name': loc, 'size': d['size'], 'jig': jig})
+        return tpl_idx[loc]
+
+    def element(e):
+        t = e['element_type'].removeprefix('minecraft:')
+        proj = e.get('projection', '-')
+        idx = len(elements)
+        elements.append(None)
+        if t in ('single_pool_element', 'legacy_single_pool_element'):
+            loc = e['location'] if isinstance(e['location'], str) else None
+            elements[idx] = ('single' if t.startswith('single') else 'legacy', proj, template(loc), [])
+        elif t == 'feature_pool_element':
+            f = e['feature'] if isinstance(e['feature'], str) else 'inline'
+            elements[idx] = ('feature', proj, ns(f), [])
+        elif t == 'list_pool_element':
+            subs = []
+            for s in e['elements']:
+                s = dict(s)
+                s['projection'] = proj  # ListPoolElement.setProjectionOnEachElement
+                subs.append(element(s))
+            elements[idx] = ('list', proj, '-', subs)
+        elif t == 'empty_pool_element':
+            elements[idx] = ('empty', '-', '-', [])
+        else:
+            raise ValueError(f'pool element type {t}')
+        return idx
+
+    structs = []
+    for sname in jigsaw_structs:
+        s = jar.json('worldgen/structure', sname)
+        aliases = 1 if s.get('pool_aliases') else 0
+        md = s['max_distance_from_center']
+        h, v = (md, md) if isinstance(md, int) else (md['horizontal'], md.get('vertical', 4064))
+        sh = s['start_height']
+        if 'absolute' in sh:
+            hk = ('const', sh['absolute'], sh['absolute'])
+        elif sh.get('type', '').endswith('uniform'):
+            hk = ('uniform', sh['min_inclusive']['absolute'], sh['max_inclusive']['absolute'])
+        else:
+            hk = ('unsupported', 0, 0)
+        pad = s.get('dimension_padding', 0)
+        pb, pt = (pad, pad) if isinstance(pad, int) else (pad.get('bottom', 0), pad.get('top', 0))
+        sj = s.get('start_jigsaw_name')
+        structs.append((sname, pool_ref(s['start_pool']), nid(ns(sj)) if sj else -1, s['size'], h, v, hk,
+                        s.get('project_start_to_heightmap', '-'), 1 if s.get('use_expansion_hack') else 0, pb, pt, aliases))
+    while queue:
+        pname = queue.pop(0)
+        p = pool_json[pname]
+        rec = pools[pool_idx[pname]]
+        rec['entries'] = [(element(e['element']), e['weight']) for e in p['elements']]
+        rec['fallback'] = p['fallback']
+        pool_ref(p['fallback'])
+    # resolve after the closure is complete
+    for p in pools:
+        p['fb'] = pool_idx.get(ns(p['fallback']), -1)
+
+    def ybox(ei):  # element bounding box y span at Rotation.NONE (StructureTemplatePool.getMaxSize)
+        k, _, a, subs = elements[ei]
+        if k in ('single', 'legacy'):
+            sy = templates[a]['size'][1]
+            return abs(sy - 1) + 1
+        if k == 'feature':
+            return 1
+        if k == 'list':
+            lo, hi = 0, 0
+            for s in subs:
+                if elements[s][0] == 'empty':
+                    continue
+                sk, _, sa, _ = elements[s]
+                top = (templates[sa]['size'][1] - 1) if sk in ('single', 'legacy') else 0
+                lo, hi = min(lo, top), max(hi, top)
+            return hi - lo + 1
+        return 0
+
+    out = [f'jigsaw 1 {"*" if version.startswith("26.3") else "minecraft:bottom"}']
+    # pool names first (nid order is independent)
+    for p in pools:
+        size = sum(wt for _, wt in p['entries'])
+        p['size'] = size
+    for t in templates:
+        for j in t['jig']:
+            nid(j[6]); nid(j[7])
+    out.append(f'jigsaw_names {len(names)}')
+    out += names
+    out.append(f'jigsaw_templates {len(templates)}')
+    for t in templates:
+        js = ' '.join(f'{x} {y} {z} {f} {tp} {0 if jt == "rollable" else 1} {name_idx[n]} {name_idx[tg]} {pool_idx.get(pl, -1)} {pp} {sp}'
+                      for (y, x, z, f, tp, jt, n, tg, pl, pp, sp) in t['jig'])
+        out.append(f'{t["name"]} {t["size"][0]} {t["size"][1]} {t["size"][2]} {len(t["jig"])} {js}'.rstrip())
+    out.append(f'jigsaw_elements {len(elements)}')
+    for k, proj, a, subs in elements:
+        out.append(f'{k} {proj} {a} {len(subs)} {" ".join(map(str, subs))}'.rstrip())
+    out.append(f'jigsaw_pools {len(pools)}')
+    for p in pools:
+        sizes = [ybox(e) for e, _ in p['entries'] if elements[e][0] != 'empty']
+        out.append(f'{p["name"]} {p["fb"]} {max(sizes) if sizes else 0} {len(p["entries"])} ' +
+                   ' '.join(f'{e} {wt}' for e, wt in p['entries']))
+    out.append(f'jigsaw_structures {len(structs)}')
+    for (sname, sp, sj, size, h, v, hk, proj, exp, pb, pt, al) in structs:
+        out.append(f'{sname} {sp} {sj} {size} {h} {v} {hk[0]} {hk[1]} {hk[2]} {proj} {exp} {pb} {pt} {al}')
+    return out
+
 def main():
     jar_path, version, params_path, out_path = sys.argv[1:5]
     jar = Jar(jar_path)
@@ -318,6 +540,8 @@ def main():
     w(f'structures {len(structs)}')
     for name, e in structs.items():
         w(f'{name} {e["type"]} {e.get("project", "-") or "-"} {e["y"]} {len(e["biomes"])} {" ".join(e["biomes"])}')
+    # appended last so older loaders (which stop after "structures") still read the pack
+    out.extend(jigsaw_section(jar, version, [n for n, e in structs.items() if e['type'] == 'jigsaw']))
     open(out_path, 'w').write('\n'.join(out) + '\n')
     print(f'{out_path}: {len(biome_ids)} biomes, {len(params)} params, {len(dfc.ops)} ops, {len(dfc.noises)} noises, '
           f'{len(sets)} structure sets')
