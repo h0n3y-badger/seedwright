@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=seedwright
+GenericName=Minecraft Seed Finder
+Comment=Find vanilla Minecraft seeds by structures, biomes, strongholds and spawn (CPU + CUDA)
+Exec=@GUI_DIR@/seedwright_gui.py
+Path=@GUI_DIR@
+Icon=edit-find
+Terminal=false
+Categories=Game;
+Keywords=minecraft;seed;finder;
+StartupWMClass=seedwright-gui
