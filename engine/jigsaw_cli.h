@@ -5,6 +5,7 @@
 //   seedwright <pack> village-bench [N]                                            single-thread cost per village
 #pragma once
 #include "jigsaw.h"
+#include "terrain.h"
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -272,6 +273,11 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 		long long dh = 0, dh2 = 0, nh = 0, nhBad = 0;
 		std::map<std::string, std::array<int, 3>> perType;  // starts, exact (est), exact (true heights)
 		bool verbose = getenv("SW_VERBOSE") != nullptr;
+		Terrain TR;  // exact heights (26.3+ packs)
+		bool haveTerrain = TR.load(argv[1]);
+		int exactTer = 0, catsTer = 0;
+		long long terCols = 0;
+		double terTime = 0;
 		int dumpRadius = getenv("SW_RADIUS") ? atoi(getenv("SW_RADIUS")) : 100, candTot = 0, candJig = 0, candOld = 0;  // oracle villages=R
 		for (int f = 3; f < argc; f++) {
 			int64_t seed;
@@ -282,6 +288,7 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 			}
 			World* w = new World();
 			worldInit(*w, pk, seed);
+			std::unique_ptr<TerrainWorld> tw(haveTerrain ? new TerrainWorld(TR, seed) : nullptr);
 			printf("== %s (seed %lld): %zu starts\n", argv[f], (long long)seed, starts.size());
 			// start selection over every candidate of the dumped sets (the dump covers all candidates within R)
 			{
@@ -334,6 +341,21 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 					              std::to_string(s.box[i][3]) + " " + std::to_string(s.box[i][5]));
 				auto& pt = perType[s.structure];
 				pt[0]++;
+				if (tw) {  // exact terrain: the whole start (structure choice + layout) from our own heights
+					HeightGrid eg = terrainGrid(*tw);
+					long long c0 = tw->columns();
+					double t0 = now();
+					int pick2 = si >= 0 ? jigsawStructureAt(*w, pk, T, J, si, s.cx, s.cz, &eg) : -1;
+					int n = pick2 == st ? jigsawLayout(*w, pk, J, st, s.cx, s.cz, buf.data(), (int)buf.size(), &eg) : -1;
+					terTime += now() - t0;
+					terCols += tw->columns() - c0;
+					std::multiset<std::string> got;
+					for (int i = 0; i < n; i++) got.insert(pieceDesc(P, buf[i], s.cx << 4, s.cz << 4));
+					bool exact = n >= 0 && got == want;
+					exactTer += exact;
+					catsTer += n > 0 && categoryCounts(H, buf.data(), n) == wantCats;
+					if (!exact) printf("  MISMATCH %s %d %d with exact terrain: %d pieces vs vanilla %zu\n", s.structure.c_str(), s.cx, s.cz, n, s.elem.size());
+				}
 				for (int mode = 0; mode < 2; mode++) {
 					int n = jigsawLayout(*w, pk, J, st, s.cx, s.cz, buf.data(), (int)buf.size(), mode ? &g : nullptr);
 					std::multiset<std::string> got;
@@ -403,6 +425,9 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 		printf("starts %d: structure choice (exact xz, real heights) %d/%d\n", tot, stOk, tot);
 		printf("  with vanilla heights: identical piece lists %d/%d, identical ignoring y %d/%d, identical building counts %d/%d\n", exactTrue, tot,
 		       xzTrue, tot, catsTrue, tot);
+		if (haveTerrain)
+			printf("  with exact terrain (terrain.h): identical piece lists %d/%d, identical building counts %d/%d (%.1f columns, %.1f ms per start)\n",
+			       exactTer, tot, catsTer, tot, (double)terCols / std::max(1, tot), terTime * 1e3 / std::max(1, tot));
 		printf("  with estimated heights: identical piece lists %d/%d, identical ignoring y %d/%d, identical building counts %d/%d, same piece "
 		       "count %d/%d\n",
 		       exactEst, tot, xzEst, tot, catsEst, tot, countEst, tot);
@@ -417,7 +442,45 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 		if (nh)
 			printf("  height estimate on piece footprints: mean error %+.2f, rms %.2f, |err| > 4 in %.1f%% of %lld columns\n", (double)dh / nh,
 			       sqrt((double)dh2 / nh), 100.0 * nhBad / nh, nh);
-		return exactTrue == tot ? 0 : 1;
+		return exactTrue == tot && (!haveTerrain || exactTer == tot) ? 0 : 1;
+	}
+
+	if (cmd == "village-heights") {  // exact terrain (terrain.h) vs the oracle's heights on every dumped column
+		Terrain TR;
+		if (!TR.load(argv[1])) {
+			fprintf(stderr, "%s\n", TR.error.c_str());
+			return 2;
+		}
+		int step = getenv("SW_STEP") ? atoi(getenv("SW_STEP")) : 1;
+		long long n = 0, bad = 0;
+		double t0 = now();
+		for (int f = 3; f < argc; f++) {
+			int64_t seed;
+			std::vector<OracleStart> starts;
+			if (!readOracle(argv[f], seed, starts)) {
+				fprintf(stderr, "cannot read %s\n", argv[f]);
+				return 2;
+			}
+			TerrainWorld tw(TR, seed);
+			long long fb = 0, fn = 0;
+			for (auto& s : starts)
+				for (int k = 0; k < s.hnz; k += step)
+					for (int i = 0; i < s.hnx; i += step) {
+						int h = s.heights[(size_t)k * s.hnx + i];
+						if (h == HEIGHT_UNKNOWN) continue;
+						int e = tw.height(s.hx0 + i, s.hz0 + k);
+						fn++;
+						if (e != h) {
+							if (fb++ < 5) printf("  seed %lld column %d %d: ours %d vanilla %d\n", (long long)seed, s.hx0 + i, s.hz0 + k, e, h);
+						}
+					}
+			printf("%s: %lld/%lld columns exact\n", argv[f], fn - fb, fn);
+			n += fn;
+			bad += fb;
+		}
+		double t1 = now();
+		printf("heights: %lld/%lld exact (%.3f ms per column)\n", n - bad, n, (t1 - t0) * 1e3 / std::max(1LL, n));
+		return bad ? 1 : 0;
 	}
 
 	if (cmd == "village-bench") {  // single thread: villages around the origin of N seeds; --gpu M: GPU run checked against CPU

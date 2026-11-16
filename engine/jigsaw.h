@@ -90,6 +90,9 @@ static_assert(sizeof(Piece) == 20, "Piece layout");
 struct HeightGrid {  // optional true heights (first free y, WORLD_SURFACE_WG), absolute coordinates
 	const int16_t* h;
 	int x0, z0, nx, nz;
+	// host only: exact height for columns outside the grid (terrain.h TerrainWorld), e.g. heightFn = terrainHeightFn
+	int (*fn)(void* ctx, int x, int z) = nullptr;
+	void* ctx = nullptr;
 };
 enum { HEIGHT_UNKNOWN = -32768 };
 
@@ -255,6 +258,9 @@ HDN int jigsawHeight(const World& w, const PackDev& pk, const HeightGrid* g, int
 			if (h != HEIGHT_UNKNOWN) return h;
 		}
 	}
+#ifndef __CUDA_ARCH__
+	if (g && g->fn) return g->fn(g->ctx, x, z);
+#endif
 	return estimateSurfaceY(w, pk, x, z);
 }
 
