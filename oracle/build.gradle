@@ -5,6 +5,11 @@ version = project.version
 group = project.group
 base { archivesName = 'seedwright-oracle' }
 
+// 26.3+ uses the new float noise/density API ("modern"); 1.21.1-26.2 share the "legacy" one.
+// Obfuscated versions (1.21.x) need the remapping Loom plugin: see ../oracle-legacy.
+def legacy = project.hasProperty('legacy')
+sourceSets.main.java.srcDirs = ['src/common/java', legacy ? 'src/legacy/java' : 'src/modern/java']
+
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
@@ -20,10 +25,10 @@ loom {
 }
 
 tasks.withType(JavaCompile).configureEach {
-	it.options.release = 25
+	it.options.release = 21
 	it.options.encoding = "UTF-8"
 }
 java {
-	sourceCompatibility = JavaVersion.VERSION_25
-	targetCompatibility = JavaVersion.VERSION_25
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
 }

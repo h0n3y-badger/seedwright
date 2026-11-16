@@ -75,7 +75,7 @@ static int verify(const Pack& P, const StructTables& T, const std::vector<std::s
 		printf("== %s (seed %lld)\n", f.c_str(), (long long)seed);
 		int n;
 		in >> k >> n;  // points
-		int climBad[6] = {0}, biomeBad = 0;
+		int climBad[6] = {0}, biomeBad = 0, chainBad = 0, chainLeaf = -1;
 		for (int i = 0; i < n; i++) {
 			int qx, qy, qz;
 			std::string h[6], biome;
@@ -90,10 +90,13 @@ static int verify(const Pack& P, const StructTables& T, const std::vector<std::s
 						printf("  climate[%d] @%d,%d,%d: got %08x (%.9g) want %s (%.9g)\n", j, qx, qy, qz, fbits(c[j]), c[j], h[j].c_str(), bitsF(h[j]));
 				}
 			if (P.biomes[b] != biome && biomeBad++ < 5) printf("  biome @%d,%d,%d: got %s want %s\n", qx, qy, qz, P.biomes[b].c_str(), biome.c_str());
+			// vanilla's RTree starts from the thread's previous result: replay the oracle's query order
+			chainLeaf = leafFromClimate(pk, c, chainLeaf);
+			chainBad += P.biomes[pk.rnodes[chainLeaf].biome] != biome;
 		}
-		printf("  points: %d  climate mismatches t/h/c/e/d/w = %d %d %d %d %d %d  biome mismatches = %d\n", n, climBad[0], climBad[1], climBad[2],
-		       climBad[3], climBad[4], climBad[5], biomeBad);
-		bad += biomeBad;
+		printf("  points: %d  climate mismatches t/h/c/e/d/w = %d %d %d %d %d %d  biome mismatches = %d (fresh search), %d (replaying vanilla's lastResult chain)\n",
+		       n, climBad[0], climBad[1], climBad[2], climBad[3], climBad[4], climBad[5], biomeBad, chainBad);
+		bad += chainBad;
 		for (int j = 0; j < 6; j++) bad += climBad[j];
 		in >> k >> n;  // columns
 		int colBad = 0, colTot = 0;
@@ -116,6 +119,13 @@ static int verify(const Pack& P, const StructTables& T, const std::vector<std::s
 		in >> k >> ox >> oz;
 		int sx, sz;
 		spawnOrigin(*w, pk, sx, sz);
+		if (getenv("SW_SPAWN_DEBUG")) {
+			int64_t bestTheirs = INT64_MAX;
+			for (int x = ox * 16; x < ox * 16 + 16; x++)
+				for (int z = oz * 16; z < oz * 16 + 16; z++) bestTheirs = std::min(bestTheirs, spawnFitness(*w, pk, x, z));
+			printf("  spawn debug: ours (%d,%d) fitness %lld; best in vanilla's chunk %lld; origin %lld\n", sx, sz, (long long)spawnFitness(*w, pk, sx, sz),
+			       (long long)bestTheirs, (long long)spawnFitness(*w, pk, 0, 0));
+		}
 		printf("  spawn origin chunk: got %d %d want %d %d %s\n", sx >> 4, sz >> 4, ox, oz, (sx >> 4) == ox && (sz >> 4) == oz ? "OK" : "MISMATCH");
 		bad += !((sx >> 4) == ox && (sz >> 4) == oz);
 		std::getline(in, line);

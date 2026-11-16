@@ -64,11 +64,11 @@ struct Column {
 HDN void columnClimate(const World& w, const PackDev& pk, int qx, int qz, Column& col) {
 	col.qminY = (pk.minY - 1) >> 2;
 	col.qmaxY = (pk.minY + pk.height - 1) >> 2;
-	float pv[MAX_OPS], v[MAX_OPS];
+	double pv[MAX_OPS], v[MAX_OPS];
 	int upto = climateUpto(pk);
 	for (int qy = col.qminY; qy <= col.qmaxY; qy++) {
 		evalOpsState(w, pk, qx << 2, qy << 2, qz << 2, true, false, upto, pv, v, qy != col.qminY);
-		for (int i = 0; i < 6; i++) col.c6[qy - col.qminY][i] = v[pk.climate[i]];
+		for (int i = 0; i < 6; i++) col.c6[qy - col.qminY][i] = (float)v[pk.climate[i]];
 		col.biome[qy - col.qminY] = -1;
 	}
 }
@@ -87,12 +87,12 @@ HDN void columnBiomes(const World& w, const PackDev& pk, int qx, int qz, Column&
 	int leaf = -1;
 	col.qminY = (pk.minY - 1) >> 2;
 	col.qmaxY = (pk.minY + pk.height - 1) >> 2;
-	float pv[MAX_OPS], v[MAX_OPS];
+	double pv[MAX_OPS], v[MAX_OPS];
 	int upto = climateUpto(pk);
 	for (int qy = col.qminY; qy <= col.qmaxY; qy++) {
 		evalOpsState(w, pk, qx << 2, qy << 2, qz << 2, true, false, upto, pv, v, qy != col.qminY);
 		float c6[6];
-		for (int i = 0; i < 6; i++) c6[i] = v[pk.climate[i]];
+		for (int i = 0; i < 6; i++) c6[i] = (float)v[pk.climate[i]];
 		leaf = leafFromClimate(pk, c6, leaf);
 		col.biome[qy - col.qminY] = pk.rnodes[leaf].biome;
 		for (int i = 0; i < 6; i++) col.c6[qy - col.qminY][i] = c6[i];
@@ -121,6 +121,7 @@ HDN bool structureBiomeOk(const World& w, const PackDev& pk, const StructTables&
 	// starting at the surface (any-of is order independent; RTree results don't depend on the seed leaf
 	// except for exact ties, which vanilla itself resolves by thread history)
 	if (!maskHas(S.biomes, biomeAt(w, pk, qx, surf, qz, 2))) return false;
+	if (pk.legacy) return true;  // pre-26.3 has no column pre-check
 	int leaf = -1;
 	if (maskHas(S.biomes, columnBiome(pk, col, surf, leaf))) return true;
 	for (int qy = col.qminY; qy <= col.qmaxY; qy++)
@@ -168,10 +169,17 @@ HDN int strongholds(const World& w, const PackDev& pk, const SetDev& s, int want
 		search.setSeed((uint64_t)rnd.nextLong());  // random.fork()
 		// findBiomeHorizontal(sectionToBlock(ix,8), 0, sectionToBlock(iz,8), 112, preferred, search)
 		int cxq = ((ix << 4) + 8) >> 2, czq = ((iz << 4) + 8) >> 2, R = 112 >> 2;
-		int found = 0, rx = 0, rz = 0;
+		int found = 0, rx = 0, rz = 0, leaf = -1;
+		float pv[MAX_OPS];
+		int upto = climateUpto(pk);
 		for (int dz = -R; dz <= R; dz++)
 			for (int dx = -R; dx <= R; dx++) {
-				int b = biomeAt(w, pk, cxq + dx, 0, czq + dz, 0);
+				// vanilla's RTree carries lastResult from query to query: chain it through the scan
+				evalOps(w, pk, (cxq + dx) << 2, 0, (czq + dz) << 2, false, false, upto, pv);
+				float c6[6];
+				for (int k = 0; k < 6; k++) c6[k] = pv[pk.climate[k]];
+				leaf = leafFromClimate(pk, c6, leaf);
+				int b = pk.rnodes[leaf].biome;
 				if (maskHas(s.preferred, b)) {
 					if (found == 0 || search.nextInt(found + 1) == 0) {
 						rx = (cxq + dx) << 2;

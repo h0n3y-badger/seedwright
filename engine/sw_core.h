@@ -107,7 +107,7 @@ struct Op {
 	int16_t a, b, c;
 	float f0, f1;
 	double d0, d1;
-	int i0, i1, i2;
+	int i0, i1, i2, i3;
 };
 
 struct SplineNode {
@@ -117,14 +117,16 @@ struct SplineNode {
 };
 
 struct LayerDesc {
-	double freq;
+	double freq;  // float engine: octave frequency; legacy: lowestFreqInputFactor * 2^i
 	float amp;
+	double ampD, vf;  // legacy: amplitudes[i], lowestFreqValueFactor / 2^i
 	int second;  // 0 = first, 1 = second (x1.0181268882175227) branch
 	uint64_t hlo, hhi;  // md5("octave_N")
 };
 
 struct NoiseDesc {
 	int nlayers, layer0;
+	double valueFactor;  // legacy NormalNoise
 	uint64_t hlo, hhi;  // md5("minecraft:name")
 };
 
@@ -133,9 +135,11 @@ struct RNode {
 	int child0, nchild, biome;
 };
 
-enum { MAX_OPS = 64, MAX_NOISES = 8, MAX_LAYERS = 64, MAX_SPLINES = 512, MAX_SPLINE_PTS = 1024, MAX_RNODES = 9000 };
+enum { MAX_OPS = 64, MAX_NOISES = 8, MAX_LAYERS = 64, MAX_SPLINES = 512, MAX_SPLINE_PTS = 1024, MAX_RNODES = 12000 };
 
 struct PackDev {
+	int legacy;  // 1 = MC 1.21.1-26.2 double-precision noise/density functions
+	int oldSpawn;  // 1 = 1.21.1 spawn fitness (quartic distance penalty)
 	int nops, nnoises, nlayers, nsplines, nrnodes;
 	int climate[6];
 	int minY, height, seaLevel;
@@ -254,6 +258,50 @@ HD float noiseGet(const World& w, const PackDev& pk, int n, double x, double y, 
 	return v;
 }
 
+// ---------------------------------------------------------------- legacy noise (1.21.1 - 26.2, double precision)
+
+HD double smoothstepD(double x) { return x * x * x * (x * (x * 6.0 - 15.0) + 10.0); }
+HD double lerpD(double a, double p0, double p1) { return p0 + a * (p1 - p0); }
+HD double legacyWrap(double x) { return x - (double)(int64_t)floor(x / 3.3554432E7 + 0.5) * 3.3554432E7; }
+
+HD double improvedNoise(const Perlin& P, double X, double Y, double Z) {  // ImprovedNoise.noise(x,y,z)
+	double x = X + P.ox, y = Y + P.oy, z = Z + P.oz;
+	int fx = (int)floor(x), fy = (int)floor(y), fz = (int)floor(z);
+	double rx = x - fx, ry = y - fy, rz = z - fz;
+#define PM(v) ((int)P.p[(v) & 0xFF])
+	int x0 = PM(fx), x1 = PM(fx + 1);
+	int xy00 = PM(x0 + fy), xy01 = PM(x0 + fy + 1), xy10 = PM(x1 + fy), xy11 = PM(x1 + fy + 1);
+	auto dot = [](int h, double a, double b, double c) {
+		float gx, gy, gz;
+		grad(h & 15, gx, gy, gz);
+		return (double)gx * a + (double)gy * b + (double)gz * c;
+	};
+	double d000 = dot(PM(xy00 + fz), rx, ry, rz), d100 = dot(PM(xy10 + fz), rx - 1.0, ry, rz);
+	double d010 = dot(PM(xy01 + fz), rx, ry - 1.0, rz), d110 = dot(PM(xy11 + fz), rx - 1.0, ry - 1.0, rz);
+	double d001 = dot(PM(xy00 + fz + 1), rx, ry, rz - 1.0), d101 = dot(PM(xy10 + fz + 1), rx - 1.0, ry, rz - 1.0);
+	double d011 = dot(PM(xy01 + fz + 1), rx, ry - 1.0, rz - 1.0), d111 = dot(PM(xy11 + fz + 1), rx - 1.0, ry - 1.0, rz - 1.0);
+#undef PM
+	double ax = smoothstepD(rx), ay = smoothstepD(ry), az = smoothstepD(rz);
+	return lerpD(az, lerpD(ay, lerpD(ax, d000, d100), lerpD(ax, d010, d110)), lerpD(ay, lerpD(ax, d001, d101), lerpD(ax, d011, d111)));
+}
+
+HD double legacyOctaves(const World& w, const PackDev& pk, const NoiseDesc& nd, int second, double x, double y, double z) {
+	double v = 0.0;
+	for (int l = 0; l < nd.nlayers; l++) {
+		const LayerDesc& L = pk.layers[nd.layer0 + l];
+		if (L.second != second) continue;
+		double n = improvedNoise(w.perlin[nd.layer0 + l], legacyWrap(x * L.freq), legacyWrap(y * L.freq), legacyWrap(z * L.freq));
+		v += L.ampD * n * L.vf;
+	}
+	return v;
+}
+
+HD double noiseGetLegacy(const World& w, const PackDev& pk, int n, double x, double y, double z) {  // NormalNoise.getValue
+	const NoiseDesc& nd = pk.noises[n];
+	const double F = 1.0181268882175227;
+	return (legacyOctaves(w, pk, nd, 0, x, y, z) + legacyOctaves(w, pk, nd, 1, x * F, y * F, z * F)) * nd.valueFactor;
+}
+
 // ---------------------------------------------------------------- density program (point + volume semantics)
 
 HDN float splineEval(const PackDev& pk, int s, const float* vals) {
@@ -294,12 +342,64 @@ HDN float splineEval(const PackDev& pk, int s, const float* vals) {
 // Evaluates ops [0, upto] at a block position. vol=true: DensityVolume semantics for every op.
 // colHit=true (point mode): cached ops take their volume value (a point query landing inside a
 // column volume a cache cell still holds, as in Structure.GenerationContext).
-HDN void evalOpsState(const World& w, const PackDev& pk, int bx, int by, int bz, bool vol, bool colHit, int upto, float* pv, float* vv,
+// state arrays are double so the legacy engine can share them; float-engine values are stored exactly.
+HDN float splineEvalD(const PackDev& pk, int s, const double* vals) {  // legacy: coordinates cast to float
+	float tmp[MAX_OPS];
+	const SplineNode& sn = pk.splines[s];
+	(void)sn;
+	for (int i = 0; i < pk.nops; i++) tmp[i] = (float)vals[i];
+	return splineEval(pk, s, tmp);
+}
+
+HDN double legacyOp(const World& w, const PackDev& pk, const Op& o, int bx, int by, int bz, const double* R) {
+	double A = o.a >= 0 ? R[o.a] : 0.0;
+	switch (o.code) {
+	case OP_CONST: return o.d0;
+	case OP_ADD: return A + R[o.b];
+	case OP_MUL: return A == 0.0 ? 0.0 : A * R[o.b];
+	case OP_MIN: { double B = R[o.b]; return A < B ? A : B; }
+	case OP_MAX: { double B = R[o.b]; return A > B ? A : B; }
+	case OP_ABS: return fabs(A);
+	case OP_SQUARE: return A * A;
+	case OP_CUBE: return A * A * A;
+	case OP_HALFNEG: return A > 0.0 ? A : A * 0.5;
+	case OP_QUARTNEG: return A > 0.0 ? A : A * 0.25;
+	case OP_INVERT: return 1.0 / A;
+	case OP_SQUEEZE: {
+		double c = A < -1.0 ? -1.0 : (A > 1.0 ? 1.0 : A);
+		return c / 2.0 - c * c * c / 24.0;
+	}
+	case OP_CLAMP: return A < o.d0 ? o.d0 : (A > o.d1 ? o.d1 : A);
+	case OP_LERP: return lerpD(A, R[o.b], R[o.c]);
+	case OP_YGRAD: {  // Mth.clampedMap(y, fromY, toY, fromValue, toValue)
+		double t = ((double)by - (double)o.i0) / ((double)o.i3 - (double)o.i0);
+		return t < 0.0 ? o.d0 : (t > 1.0 ? o.d1 : lerpD(t, o.d0, o.d1));
+	}
+	case OP_SHIFTA: return noiseGetLegacy(w, pk, o.i0, bx * 0.25, 0.0, bz * 0.25) * 4.0;
+	case OP_SHIFTB: return noiseGetLegacy(w, pk, o.i0, bz * 0.25, bx * 0.25, 0.0) * 4.0;
+	case OP_NOISE:
+		if (o.unshifted) return noiseGetLegacy(w, pk, o.i0, bx * o.d0, by * o.d1, bz * o.d0);
+		return noiseGetLegacy(w, pk, o.i0, bx * o.d0 + A, by * o.d1 + R[o.b], bz * o.d0 + R[o.c]);
+	case OP_RANGE: return (A >= o.d0 && A < o.d1) ? R[o.b] : R[o.c];
+	case OP_SPLINE: return (double)splineEvalD(pk, o.i0, R);
+	default: return 0.0;
+	}
+}
+
+HDN void evalOpsState(const World& w, const PackDev& pk, int bx, int by, int bz, bool vol, bool colHit, int upto, double* pv, double* vv,
                       bool ydepOnly) {
+	if (pk.legacy) {  // one semantics (no separate volume path); results go to both arrays
+		for (int i = 0; i <= upto; i++) {
+			const Op& o = pk.ops[i];
+			if (ydepOnly && !o.ydep) continue;
+			pv[i] = vv[i] = legacyOp(w, pk, o, bx, by, bz, pv);
+		}
+		return;
+	}
 	bool needV = vol || colHit;
 	for (int pass = needV ? 0 : 1; pass < (vol ? 1 : 2); pass++) {
 		bool V = pass == 0;  // pass 0: volume values, pass 1: point values
-		float* R = V ? vv : pv;
+		double* R = V ? vv : pv;
 		for (int i = 0; i <= upto; i++) {
 			const Op& o = pk.ops[i];
 			if (ydepOnly && !o.ydep) continue;
@@ -307,7 +407,7 @@ HDN void evalOpsState(const World& w, const PackDev& pk, int bx, int by, int bz,
 				pv[i] = vv[i];
 				continue;
 			}
-			float A = o.a >= 0 ? R[o.a] : 0.0f, B = o.b >= 0 ? R[o.b] : 0.0f;
+			float A = o.a >= 0 ? (float)R[o.a] : 0.0f, B = o.b >= 0 ? (float)R[o.b] : 0.0f;
 			float r;
 			switch (o.code) {
 			case OP_CONST: r = o.f0; break;
@@ -327,15 +427,14 @@ HDN void evalOpsState(const World& w, const PackDev& pk, int bx, int by, int bz,
 				break;
 			}
 			case OP_CLAMP: r = A < o.f0 ? o.f0 : (A > o.f1 ? o.f1 : A); break;
-			case OP_LERP: r = lerpf(A, B, R[o.c]); break;
+			case OP_LERP: r = lerpf(A, B, (float)R[o.c]); break;
 			case OP_YGRAD: {  // i0 = from_coordinate, i1/i2 = min/max coordinate, f0 = from_value, f1 = factor
 				int y = by < o.i1 ? o.i1 : (by > o.i2 ? o.i2 : by);
 				r = o.f0 + (float)(y - o.i0) * o.f1;
 				break;
 			}
 			case OP_SHIFTA:
-				r = V ? noiseGet(w, pk, o.i0, bx * 0.25, by * 0.0, bz * 0.25, true, 1.0f) * 4.0f
-				      : noiseGet(w, pk, o.i0, bx * 0.25, by * 0.0, bz * 0.25, false, 1.0f) * 4.0f;
+				r = noiseGet(w, pk, o.i0, bx * 0.25, by * 0.0, bz * 0.25, V, 1.0f) * 4.0f;
 				break;
 			case OP_SHIFTB:
 				r = V ? noiseGet(w, pk, o.i0, bz * 0.25, bx * 0.25, 0.0, true, 4.0f)
@@ -343,10 +442,10 @@ HDN void evalOpsState(const World& w, const PackDev& pk, int bx, int by, int bz,
 				break;
 			case OP_NOISE:
 				if (o.unshifted) r = noiseGet(w, pk, o.i0, bx * o.d0, by * o.d1, bz * o.d0, V, 1.0f);
-				else r = noiseGet(w, pk, o.i0, bx * o.d0 + (double)A, by * o.d1 + (double)B, bz * o.d0 + (double)R[o.c], false, 1.0f);
+				else r = noiseGet(w, pk, o.i0, bx * o.d0 + (double)A, by * o.d1 + (double)B, bz * o.d0 + R[o.c], false, 1.0f);
 				break;
-			case OP_RANGE: r = (A >= o.f0 && A < o.f1) ? B : R[o.c]; break;
-			case OP_SPLINE: r = splineEval(pk, o.i0, R); break;
+			case OP_RANGE: r = (A >= o.f0 && A < o.f1) ? B : (float)R[o.c]; break;
+			case OP_SPLINE: r = splineEvalD(pk, o.i0, R); break;
 			default: r = 0.0f;
 			}
 			R[i] = r;
@@ -355,10 +454,10 @@ HDN void evalOpsState(const World& w, const PackDev& pk, int bx, int by, int bz,
 }
 
 HDN void evalOps(const World& w, const PackDev& pk, int bx, int by, int bz, bool vol, bool colHit, int upto, float* out) {
-	float pv[MAX_OPS], vv[MAX_OPS];
+	double pv[MAX_OPS], vv[MAX_OPS];
 	evalOpsState(w, pk, bx, by, bz, vol, colHit, upto, pv, vv, false);
-	float* src = vol ? vv : pv;
-	for (int i = 0; i <= upto; i++) out[i] = src[i];
+	double* src = vol ? vv : pv;
+	for (int i = 0; i <= upto; i++) out[i] = (float)src[i];
 }
 
 // ---------------------------------------------------------------- biomes (Climate RTree)
@@ -428,6 +527,14 @@ HD int biomeAt(const World& w, const PackDev& pk, int qx, int qy, int qz, int mo
 
 // ---------------------------------------------------------------- spawn origin (NoiseSpawnFinder)
 
+// lower bound of the fitness from the distance alone (the climate term is >= 0)
+HD int64_t spawnDistancePenalty(const PackDev& pk, int bx, int bz) {
+	int64_t d2 = (int64_t)bx * bx + (int64_t)bz * bz;
+	if (!pk.oldSpawn) return d2;
+	double r = (double)d2 / (2500.0 * 2500.0);
+	return (int64_t)((double)1.0E8F * pow(r, 2.0));
+}
+
 HD int64_t spawnFitness(const World& w, const PackDev& pk, int bx, int bz) {
 	int qbx = (bx >> 2) << 2, qbz = (bz >> 2) << 2;
 	float v[MAX_OPS];
@@ -444,6 +551,7 @@ HD int64_t spawnFitness(const World& w, const PackDev& pk, int bx, int bz) {
 		}
 		minF = f < minF ? f : minF;
 	}
+	if (pk.oldSpawn) return spawnDistancePenalty(pk, bx, bz) + minF;  // Climate.SpawnFinder (1.21.1)
 	return minF * (2048LL * 2048LL) + (int64_t)bx * bx + (int64_t)bz * bz;
 }
 
@@ -460,7 +568,7 @@ HD void spawnOrigin(const World& w, const PackDev& pk, int& outX, int& outZ) {
 			int x = ox + (int)(sin((double)angle) * radius);
 			int z = oz + (int)(cos((double)angle) * radius);
 			// fitness = climate*2048^2 + x^2+z^2 >= x^2+z^2: a candidate that far out can't win (exact pruning)
-			int64_t f = ((int64_t)x * x + (int64_t)z * z >= best) ? INT64_MAX : spawnFitness(w, pk, x, z);
+			int64_t f = spawnDistancePenalty(pk, x, z) >= best ? INT64_MAX : spawnFitness(w, pk, x, z);
 			if (f < best) {
 				best = f;
 				bx = x;

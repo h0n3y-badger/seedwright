@@ -138,7 +138,7 @@ class DfCompiler:
 
     def node(self, n, cached=False):
         if isinstance(n, (int, float)):
-            return self.emit('const', fp=[n])
+            return self.emit('const', fp=[n], dp=[n])
         if isinstance(n, str):
             return self.ref(n)
         t = n['type'].removeprefix('minecraft:')
@@ -149,7 +149,8 @@ class DfCompiler:
                 self.ops[i] = op[:5] + (True,)
             return i
         if t == 'constant':
-            return self.emit('const', fp=[n['argument'] if 'argument' in n else n['value']])
+            v = n['argument'] if 'argument' in n else n['value']
+            return self.emit('const', fp=[v], dp=[v])
         if t in ('add', 'mul', 'min', 'max'):
             a = self.node(n.get('left', n.get('argument1')))
             b = self.node(n.get('right', n.get('argument2')))
@@ -157,17 +158,17 @@ class DfCompiler:
         if t in ('abs', 'square', 'cube', 'half_negative', 'quarter_negative', 'squeeze', 'invert'):
             return self.emit(t, [self.node(n.get('input', n.get('argument')))])
         if t == 'clamp':
-            return self.emit('clamp', [self.node(n['input'])], fp=[n['min'], n['max']])
+            return self.emit('clamp', [self.node(n['input'])], fp=[n['min'], n['max']], dp=[n['min'], n['max']])
         if t == 'blend_alpha':
-            return self.emit('const', fp=[1.0])
+            return self.emit('const', fp=[1.0], dp=[1.0])
         if t == 'blend_offset':
-            return self.emit('const', fp=[0.0])
+            return self.emit('const', fp=[0.0], dp=[0.0])
         if t == 'blend_density':
             return self.node(n['argument'] if 'argument' in n else n['input'])
         if t == 'lerp':
             return self.emit('lerp', [self.node(n['alpha']), self.node(n['first']), self.node(n['second'])])
         if t in ('y_clamped_gradient',):
-            return self.emit('ygrad', fp=[n['from_value'], n['to_value']], ip=[n['from_y'], n['to_y']])
+            return self.emit('ygrad', fp=[n['from_value'], n['to_value']], dp=[n['from_value'], n['to_value']], ip=[n['from_y'], n['to_y']])
         if t == 'gradient':
             assert n['axis'] == 'y' and n.get('tiling', 'clamp_to_edge') == 'clamp_to_edge', n
             return self.emit('ygrad', fp=[n['from_value'], n['to_value']], ip=[n['from_coordinate'], n['to_coordinate']])
@@ -182,7 +183,7 @@ class DfCompiler:
             return self.emit('noise', [sx, sy, sz], dp=[xz, y], ip=[self.noise(n['noise'])])
         if t == 'range_choice':
             return self.emit('range_choice', [self.node(n['input']), self.node(n['when_in_range']), self.node(n['when_out_of_range'])],
-                             fp=[n['min_inclusive'], n['max_exclusive']])
+                             fp=[n['min_inclusive'], n['max_exclusive']], dp=[n['min_inclusive'], n['max_exclusive']])
         if t == 'spline':
             return self.emit('spline', ip=[self.spline(n['spline'])])
         raise ValueError(f'unsupported density function type {t}')
@@ -223,7 +224,10 @@ def main():
     jar = Jar(jar_path)
     out = []
     w = out.append
-    w(f'seedwright-pack 1 {version}')
+    legacy = 'firstOctave' in jar.json('worldgen/noise', 'temperature')
+    # NoiseSpawnFinder fitness: the quartic distance penalty only exists in 1.21.1 (verified against the oracle)
+    old_spawn = version in ('1.21', '1.21.1')
+    w(f'seedwright-pack 1 {version} {"legacy" if legacy else "float"} {"oldspawn" if old_spawn else "spawn"}')
 
     # biomes, in the order of the dumped parameter list (that order is part of the RTree build)
     params = [l.split() for l in open(params_path) if l.strip() and not l.startswith('#')]
@@ -265,8 +269,12 @@ def main():
             spawn_lines.append(f'df {len(items)} ' + ' '.join(items))
     w(f'noises {len(dfc.noises)}')
     for name in dfc.noises:
-        layers = noise_layers(jar.json('worldgen/noise', name))
-        w(f'{name} {len(layers)} ' + ' '.join(f'{o} {dbits(fr):x} {f32bits(a):x}' for o, fr, a in layers))
+        p = jar.json('worldgen/noise', name)
+        if 'firstOctave' in p:  # legacy (<= 26.2): PerlinNoise octaves, raw amplitudes, computed in the engine
+            w(f'{name} legacy {p["firstOctave"]} {len(p["amplitudes"])} ' + ' '.join(f'{dbits(a):x}' for a in p['amplitudes']))
+        else:
+            layers = noise_layers(p)
+            w(f'{name} {len(layers)} ' + ' '.join(f'{o} {dbits(fr):x} {f32bits(a):x}' for o, fr, a in layers))
     w(f'ops {len(dfc.ops)}')
     for op, args, fp, dp, ip, cached in dfc.ops:
         w(f'{op} {int(cached)} {len(args)} {" ".join(map(str, args))} | {len(fp)} {" ".join(f"{x:x}" for x in fp)} | '

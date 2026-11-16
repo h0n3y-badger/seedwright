@@ -87,8 +87,8 @@ inline void spanOf(BNode* n) {
 	}
 }
 
-inline BNode* rtreeBuild(std::vector<BNode*> children, std::vector<std::unique_ptr<BNode>>& pool) {
-	const int per = 19, dims = 7;
+inline BNode* rtreeBuild(std::vector<BNode*> children, std::vector<std::unique_ptr<BNode>>& pool, int per) {
+	const int dims = 7;
 	if (children.size() == 1) return children[0];
 	auto center = [](BNode* n, int d) { return (n->lo[d] + n->hi[d]) / 2; };
 	if ((int)children.size() <= per) {
@@ -174,7 +174,7 @@ inline BNode* rtreeBuild(std::vector<BNode*> children, std::vector<std::unique_p
 	sortBy(subs, minDim, true);
 	pool.emplace_back(new BNode());
 	BNode* n = pool.back().get();
-	for (BNode* t : subs) n->kids.push_back(rtreeBuild(t->kids, pool));
+	for (BNode* t : subs) n->kids.push_back(rtreeBuild(t->kids, pool, per));
 	spanOf(n);
 	return n;
 }
@@ -222,9 +222,11 @@ inline Pack loadPack(const std::string& path) {
 	};
 	{
 		auto ss = next();
-		std::string magic;
+		std::string magic, engine, spawn;
 		int v;
-		ss >> magic >> v >> P.version;
+		ss >> magic >> v >> P.version >> engine >> spawn;
+		pk.legacy = engine == "legacy";
+		pk.oldSpawn = spawn == "oldspawn";
 	}
 	int nb = header("biomes");
 	for (int i = 0; i < nb; i++) {
@@ -245,7 +247,7 @@ inline Pack loadPack(const std::string& path) {
 		b->hi[6] = b->lo[6];
 		leaves.push_back(b);
 	}
-	flatten(rtreeBuild(leaves, pool), pk);
+	flatten(rtreeBuild(leaves, pool, pk.legacy ? 6 : 19), pk);  // Climate.RTree CHILDREN_PER_NODE: 6 before 26.3, 19 since
 	{
 		auto ss = next();
 		std::string k;
@@ -263,10 +265,42 @@ inline Pack loadPack(const std::string& path) {
 		auto ss = next();
 		std::string name;
 		int nl;
-		ss >> name >> nl;
+		ss >> name;
 		NoiseDesc& nd = pk.noises[n];
 		md5pair(name, nd.hlo, nd.hhi);
 		nd.layer0 = pk.nlayers;
+		if (!(ss >> nl)) {  // "name legacy firstOctave count amps..." (PerlinNoise + legacy NormalNoise)
+			ss.clear();
+			std::string tag;
+			int first, cnt;
+			ss >> tag >> first >> cnt;
+			std::vector<double> amps(cnt);
+			for (auto& a : amps) {
+				ss >> tok;
+				a = bitsD(tok);
+			}
+			double inF = std::pow(2.0, (double)first), valF = std::pow(2.0, (double)(cnt - 1)) / (std::pow(2.0, (double)cnt) - 1.0);
+			int lo = INT32_MAX, hi = INT32_MIN;
+			for (int i = 0; i < cnt; i++) {
+				if (amps[i] != 0.0) {
+					lo = std::min(lo, i);
+					hi = std::max(hi, i);
+					for (int second = 0; second < 2; second++) {
+						LayerDesc& L = pk.layers[pk.nlayers++];
+						L.freq = inF;
+						L.ampD = amps[i];
+						L.vf = valF;
+						L.second = second;
+						md5pair("octave_" + std::to_string(first + i), L.hlo, L.hhi);
+					}
+				}
+				inF *= 2.0;
+				valF /= 2.0;
+			}
+			nd.valueFactor = 0.16666666666666666 / (0.1 * (1.0 + 1.0 / (double)(hi - lo + 1)));
+			nd.nlayers = pk.nlayers - nd.layer0;
+			continue;
+		}
 		for (int l = 0; l < nl; l++) {
 			int oct;
 			std::string fr, am;
@@ -331,6 +365,7 @@ inline Pack loadPack(const std::string& path) {
 			o.i2 = std::max(from, to);
 			o.f0 = fp[0];
 			o.f1 = (fp[1] - fp[0]) / (float)(to - from);
+			o.i3 = to;
 		}
 		if (o.code == OP_NOISE) {
 			auto isZero = [&](int16_t a) { return pk.ops[a].code == OP_CONST && pk.ops[a].f0 == 0.0f; };
@@ -385,7 +420,18 @@ inline Pack loadPack(const std::string& path) {
 		auto ss = next();
 		std::string k;
 		ss >> k;
-		if (k != "df") throw std::runtime_error("only 26.x df spawn targets handled here");
+		if (k == "fixed") {  // 1.21-style ParameterPoint: t,h,c,e,d,w ranges + offset; target depth is forced to 0
+			int64_t r[13];
+			for (auto& x : r) ss >> x;
+			int map[5] = {0, 1, 2, 3, 5};  // depth term: |0 - [d]| is constant; vanilla's is the point 0 -> 0
+			pk.spawnTerms[p] = 5;
+			for (int t = 0; t < 5; t++) {
+				pk.spawnOp[p][t] = pk.climate[map[t]];
+				pk.spawnLo[p][t] = r[map[t] * 2];
+				pk.spawnHi[p][t] = r[map[t] * 2 + 1];
+			}
+			continue;
+		}
 		ss >> pk.spawnTerms[p];
 		for (int t = 0; t < pk.spawnTerms[p]; t++) ss >> pk.spawnOp[p][t] >> pk.spawnLo[p][t] >> pk.spawnHi[p][t];
 	}

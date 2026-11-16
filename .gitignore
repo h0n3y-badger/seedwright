@@ -5,3 +5,8 @@ oracle/run-server-*.log
 engine/seedwright-cpu
 engine/seedwright-gpu
 data/
+oracle-legacy/.gradle/
+oracle-legacy/build/
+oracle-legacy/run/
+oracle-legacy/run-server-*.log
+truth/*/run.log
