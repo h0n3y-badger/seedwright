@@ -11,6 +11,7 @@ Run from anywhere: python3 gui/seedwright_gui.py
 import fnmatch
 import itertools
 import json
+import math
 import re
 import shlex
 import subprocess
@@ -1119,7 +1120,8 @@ class Main(QMainWindow):
         m = re.match(r"(-?\d+)\s+spawn\s+(-?\d+)\s+(-?\d+)\s*(.*)", line)
         if m:
             seed, sx, sz, rest = m.groups()
-            row = [seed, f"{sx}, {sz}", self.formatFound(rest)]
+            ax, az = (0, 0) if self.origin.isChecked() else (int(sx), int(sz))
+            row = [seed, f"{sx}, {sz}", self.formatFound(rest, ax, az)]
         elif re.match(r"-?\d+\s+no match", line):
             row = [line.split()[0], "", "no match"]
         else:
@@ -1136,8 +1138,9 @@ class Main(QMainWindow):
         self.setStatus(f"searching… {r + 1} result(s)")
 
     @staticmethod
-    def formatFound(rest):
-        """' | village 1 2 | >weaponsmith 3 4' -> 'village (1, 2) { weaponsmith (3, 4) }' (depth = number of '>')."""
+    def formatFound(rest, ax=None, az=None):
+        """' | village 1 2 | >weaponsmith 3 4' -> 'village (1, 2) { weaponsmith (3, 4) }' (depth = number of '>').
+        With an anchor, top-level finds also say how far they are from it (the match may not be the nearest one)."""
         out, depth = "", 0
         first = True
         for p in rest.split("|"):
@@ -1149,6 +1152,8 @@ class Main(QMainWindow):
             if len(f) != 3:
                 continue
             item = f"{f[0]} ({f[1]}, {f[2]})"
+            if d == 0 and ax is not None:
+                item += f" {math.hypot(int(f[1]) - ax, int(f[2]) - az):,.0f} b away"
             if d > depth:
                 out += " { " * (d - depth) + item
             else:
