@@ -10,6 +10,13 @@
 // sequence only depends on them through which pieces fit.
 //
 // Pool aliases (trial chambers) are not supported (JStruct.supported = 0).
+//
+// Use (host): JigsawHost H = buildJigsaw(pack);  H.t is a POD JigsawTables (~280 KB, cudaMemcpy it once).
+//   int cat = H.categoryIndex("weaponsmith");          // building category, see jigsawCategories(H, st)
+// per candidate chunk of a village set (host or device):
+//   int st = jigsawStructureAt(w, pk, T, J, set, cx, cz);    // like structureAt, start checked where vanilla does
+//   Piece pc[320]; int n = villageLayout(w, pk, J, st, cx, cz, pc, 320);
+//   if (n > 0 && countCategory(J, pc, n, cat) >= 2) ...
 #pragma once
 #include "structures.h"
 #include "pack.h"
