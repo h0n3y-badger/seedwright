@@ -3,6 +3,7 @@
 #pragma once
 #include "structures.h"
 #include "jigsaw.h"
+#include "loot.h"
 #include <vector>
 
 namespace sw {
@@ -16,6 +17,7 @@ enum NodeKind {
 	N_STRONGHOLD,  // >= count strongholds within radius, each satisfying the children
 	N_SPAWN,       // world spawn within radius of 0,0 (independent of the anchor)
 	N_BUILDING,    // >= count buildings of a category in the enclosing village (exact with terrain.h heights, see stageB)
+	N_LOOT,        // >= count of an item in the enclosing structure's loot containers (loot.h; villages: like N_BUILDING)
 };
 
 enum { MAX_NODES = 48, MAX_HITS = 32, MAX_DEPTH = 6, Y_ANY = -100000, MAX_STRONGHOLDS = 32, MAX_PIECES = 320, MAX_BIOME_LEAVES = 4096, MAX_KCOND = 8, MAX_KB = 512 };
@@ -33,6 +35,7 @@ struct Node {
 	// stage s: K boxes Query::kb[kb0[s], +nkb[s]) (masks index them)
 	int nkc[2], kb0[2], nkb[2];
 	uint64_t kcW[2][MAX_KCOND], kcO[2][MAX_KCOND];
+	int item, lootJig;    // N_LOOT: item (LootHost::items), 1 = needs a jigsaw layout (villages), 0 = buried treasure
 	uint64_t cat[3];      // N_BUILDING: jigsaw building categories that count (aliases: weaponsmith|weapon_smith)
 };
 
@@ -178,7 +181,7 @@ struct Hit {
 	int n;
 	int x[MAX_HITS], z[MAX_HITS], what[MAX_HITS], depth[MAX_HITS];
 };
-enum { WHAT_STRONGHOLD = -1000, WHAT_SPAWN = -1001, WHAT_BUILDING0 = -2000 };  // biomes: -1 - biome
+enum { WHAT_STRONGHOLD = -1000, WHAT_SPAWN = -1001, WHAT_BUILDING0 = -2000, WHAT_LOOT0 = -100000 };  // biomes: -1 - biome; loot: WHAT_LOOT0 - (item * 64 + min(count, 63))
 
 HD int64_t dist2(int ax, int az, int bx, int bz) {
 	int64_t dx = ax - bx, dz = az - bz;
@@ -212,11 +215,12 @@ struct EvalCtx {
 	const HeightGrid* hg;  // exact terrain heights (host, terrain.h); null: estimateSurfaceY
 	int prefilter;         // building conditions are a necessary-condition prefilter (see Query.buildingSlack)
 	int maxPcs;            // size of pcs
+	const LootTables* L;   // chest loot tables (null: no loot section)
 };
 
 HDN bool hasBuildingBelow(const Query* q, int ni) {
 	for (int k = q->n[ni].first; k >= 0; k = q->n[k].next)
-		if (q->n[k].kind == N_BUILDING || hasBuildingBelow(q, k)) return true;
+		if (q->n[k].kind == N_BUILDING || (q->n[k].kind == N_LOOT && q->n[k].lootJig) || hasBuildingBelow(q, k)) return true;
 	return false;
 }
 
@@ -473,6 +477,38 @@ HDN bool evalBuilding(EvalCtx& c, const Node& nd, int depth) {
 	return n >= need;
 }
 
+// Loot of the enclosing structure: at least nd.count of nd.item in its loot containers (loot.h). Buried treasure:
+// exact anywhere. Villages: the containers of the layout (exact with c.hg, as buildings); containers that can't
+// be predicted (a feature piece draws first in their chunk) never count. A building prefilter passes.
+HDN bool evalLoot(EvalCtx& c, const Node& nd, int depth) {
+	if (!c.L || c.curStructure < 0) return false;
+	int st = c.curStructure;
+	if (st == c.L->buriedSt) {
+		int n = buriedLoot(*c.L, st, (int64_t)c.seed, c.curCx, c.curCz, nd.item);
+		if (n < nd.count) return false;
+		addHit(c, WHAT_LOOT0 - (nd.item * 64 + (n < 63 ? n : 63)), c.curCx * 16 + 9, c.curCz * 16 + 9, depth);
+		return true;
+	}
+	if (!c.J || !c.pcs) return false;
+	if (c.prefilter) return true;  // decided by the exact check
+	if (c.layoutSt != c.curStructure || c.layoutCx != c.curCx || c.layoutCz != c.curCz) {
+		c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, c.maxPcs, c.hg);
+		c.layoutSt = c.curStructure, c.layoutCx = c.curCx, c.layoutCz = c.curCz;
+	}
+	if (c.npcs <= 0) return false;
+	int total = 0;
+	EvalCtx* cp = &c;
+	const Node* np = &nd;
+	forEachChest(*c.L, *c.J, st, c.pcs, c.npcs, c.curCx, c.curCz, (int64_t)c.seed, [&](const LootChest& ch) {
+		if (!ch.known || ch.table < 0 || !cp->L->t[ch.table].ok) return;
+		int n = lootCount(*cp->L, ch.table, ch.seed, np->item);
+		if (n <= 0) return;
+		total += n;
+		addHit(*cp, WHAT_LOOT0 - (np->item * 64 + (n < 63 ? n : 63)), ch.x, ch.z, depth);
+	});
+	return total >= nd.count;
+}
+
 HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth) {
 	const Node& nd = c.q->n[ni];
 	switch (nd.kind) {
@@ -506,6 +542,8 @@ HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth) {
 		return c.mode != EVAL_B || dist2(c.spawnX, c.spawnZ, 0, 0) <= (int64_t)nd.radius * nd.radius;
 	case N_BUILDING:
 		return c.mode != EVAL_B || evalBuilding(c, nd, depth);
+	case N_LOOT:
+		return c.mode != EVAL_B || evalLoot(c, nd, depth);
 	}
 	return false;
 }
@@ -524,7 +562,8 @@ HDN bool stageA(const StructTables& T, const Query& q, uint64_t seed) {
 // with hg (terrain.h heights, host only); prefilter = necessary condition for that exact check (estimated
 // layouts with Query.buildingSlack); neither: estimated layouts taken at face value (approximate).
 HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const Query& q, Hit& hit, const JigsawTables* J = nullptr,
-                Piece* pieces = nullptr, const HeightGrid* hg = nullptr, bool prefilter = false, int maxPieces = MAX_PIECES) {
+                Piece* pieces = nullptr, const HeightGrid* hg = nullptr, bool prefilter = false, int maxPieces = MAX_PIECES,
+                const LootTables* L = nullptr) {
 	EvalCtx c{};
 	c.w = &w;
 	c.pk = &pk;
@@ -538,6 +577,7 @@ HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const 
 	c.layoutSt = -1;
 	c.hg = hg;
 	c.maxPcs = maxPieces;
+	c.L = L;
 	c.prefilter = prefilter && q.hasBuildings;
 	hit.seed = w.seed;
 	hit.n = 0;

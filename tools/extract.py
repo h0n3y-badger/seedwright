@@ -437,6 +437,110 @@ def terrain_section(jar, ns):
     out.append('terrain_roots ' + ' '.join(map(str, [len(roots)] + roots)))
     return out
 
+
+# ---------------- chest loot ----------------
+
+# item modifiers that never touch the loot random (anything else marks the table unsupported)
+LOOT_NO_RANDOM = {'set_potion', 'set_name', 'set_lore', 'set_components', 'set_custom_data', 'set_item', 'copy_components',
+                  'set_custom_model_data', 'set_banner_pattern', 'set_fireworks', 'set_firework_explosion', 'set_book_cover',
+                  'set_written_book_pages', 'set_writable_book_pages', 'toggle_tooltips', 'set_contents', 'reference'}
+
+def loot_section(jar, templates, structs_step):
+    """Loot tables the jigsaw templates' containers (and buried treasure) use, compiled to: pools (rolls range),
+    entries (item, weight, set_count range). Only what the item totals need: modifiers that use the loot random
+    other than set_count (enchantments, damage, instruments...) make a table 'unsupported' (its chests count as
+    unknown), as do conditions. Also every structure's (generation step, index in the registry within that step)
+    for WorldgenRandom.setFeatureSeed (registry order = identifier order, checked with the oracle)."""
+    items, item_idx = [], {}
+    def item(n):
+        n = ns(n)
+        if n not in item_idx:
+            item_idx[n] = len(items)
+            items.append(n)
+        return item_idx[n]
+    tables, table_idx = [], {}
+
+    def num(v):  # (min, max) of an int provider; None = not a plain constant/uniform
+        if isinstance(v, (int, float)):
+            return (math.floor(v), math.floor(v))
+        if isinstance(v, dict):
+            t = v.get('type', 'minecraft:uniform').removeprefix('minecraft:')
+            if t == 'constant':
+                return num(v['value'])
+            if t == 'uniform' and isinstance(v.get('min'), (int, float)) and isinstance(v.get('max'), (int, float)):
+                return (math.floor(v['min']), math.floor(v['max']))
+        return None
+
+    def mods(o):  # item modifiers of an entry / pool / table, 26.3 'modifier' (one or a list) or older 'functions'
+        m = o.get('modifier', o.get('functions', []))
+        return m if isinstance(m, list) else [m]
+
+    def table(name):
+        name = ns(name)
+        if name in table_idx:
+            return table_idx[name]
+        nsp, _, path = name.partition(':')
+        fn = f'data/{nsp}/loot_table/{path}.json'
+        ok = fn in jar.names
+        pools = []
+        d = json.loads(jar.z.read(fn)) if ok else {}
+        for m in mods(d):
+            ok &= isinstance(m, dict) and m.get('type', m.get('function', '')).removeprefix('minecraft:') in LOOT_NO_RANDOM and 'conditions' not in m and 'condition' not in m
+        for p in d.get('pools', []):
+            rolls = num(p.get('rolls', 1))
+            bonus = p.get('bonus_rolls', 0)
+            ok &= rolls is not None and isinstance(bonus, (int, float))  # a constant bonus * luck 0 draws nothing
+            ok &= 'conditions' not in p and 'condition' not in p
+            for m in mods(p):
+                ok &= isinstance(m, dict) and m.get('type', m.get('function', '')).removeprefix('minecraft:') in LOOT_NO_RANDOM
+            ents = []
+            for e in p.get('entries', []):
+                t = e.get('type', '').removeprefix('minecraft:')
+                ok &= 'conditions' not in e and 'condition' not in e and t in ('item', 'empty')
+                cnt, add = (1, 1), 0
+                for m in mods(e):
+                    mt = m.get('type', m.get('function', '')).removeprefix('minecraft:') if isinstance(m, dict) else '?'
+                    if mt == 'set_count' and 'conditions' not in m and 'condition' not in m and cnt == (1, 1) and num(m['count']) is not None:
+                        cnt, add = num(m['count']), 1 if m.get('add') else 0
+                    else:
+                        ok &= mt in LOOT_NO_RANDOM
+                w = e.get('weight', 1)
+                q = e.get('quality', 0)
+                ents.append((item(e['name']) if t == 'item' else -1, w, q, cnt[0], cnt[1], add))
+            pools.append((rolls or (0, 0), ents))
+        table_idx[name] = len(tables)
+        tables.append((name, 1 if ok else 0, pools))
+        return table_idx[name]
+
+    tl = []
+    for i, t in enumerate(templates):
+        if t['cont']:
+            tl.append(f'{i} {len(t["cont"])} ' + ' '.join(f'{x} {y} {z} {table(lt) if lt != "-" else -1}' for (y, x, z, lt) in t['cont']))
+    bt = table('minecraft:chests/buried_treasure')
+    out = [f'loot 1 {bt}']
+    out.append(f'loot_structures {len(structs_step)}')
+    out += [f'{n} {st} {ix}' for n, st, ix in structs_step]
+    out.append(f'loot_templates {len(tl)}')
+    out += tl
+    out.append(f'loot_tables {len(tables)}')
+    for name, ok, pools in tables:
+        out.append(f'{name} {ok} {len(pools)} ' + ' '.join(f'{r[0]} {r[1]} {len(ents)} ' + ' '.join(' '.join(map(str, e)) for e in ents)
+                                                        for r, ents in pools))
+    out.append(f'loot_items {len(items)}')
+    out += items
+    return out
+
+def structure_steps(jar):
+    """(id, generation step ordinal, index within the step) in registry (= identifier) order."""
+    steps = ['raw_generation', 'lakes', 'local_modifications', 'underground_structures', 'surface_structures', 'strongholds',
+             'underground_ores', 'underground_decoration', 'fluid_springs', 'vegetal_decoration', 'top_layer_modification']
+    per, out = {}, []
+    for n in sorted(jar.list('worldgen/structure')):
+        st = steps.index(jar.json('worldgen/structure', 'minecraft:' + n)['step'])
+        out.append(('minecraft:' + n, st, per.get(st, 0)))
+        per[st] = per.get(st, 0) + 1
+    return out
+
 # ---------------- structures ----------------
 
 def structure_entry(jar, name):
@@ -512,6 +616,9 @@ def read_nbt(data):
     return payload(t)
 
 DIRS = ['down', 'up', 'north', 'south', 'west', 'east']  # net.minecraft.core.Direction order
+# block entities implementing RandomizableContainer (+ every *shulker_box)
+CONTAINER_BLOCKS = {'minecraft:chest', 'minecraft:trapped_chest', 'minecraft:barrel', 'minecraft:dispenser', 'minecraft:dropper',
+                    'minecraft:hopper', 'minecraft:decorated_pot', 'minecraft:crafter'}
 
 def ns(ident):
     return ident if ':' in ident else 'minecraft:' + ident
@@ -578,7 +685,16 @@ def jigsaw_section(jar, version, jigsaw_structs):
         for j in jig:
             pool_ref(j[8])
         tpl_idx[loc] = len(templates)
-        templates.append({'name': loc, 'size': d['size'], 'jig': jig})
+        # loot containers: block-entity blocks (nbt present) that are RandomizableContainers; each draws
+        # random.nextLong() for its LootTableSeed when placed, in palette order = (y, x, z) among nbt blocks
+        cont = []
+        for b in d['blocks']:
+            s = pals[0][b['state']]
+            bid = s.get('Name', s.get('id'))
+            if 'nbt' in b and (bid in CONTAINER_BLOCKS or bid.endswith('shulker_box')):
+                cont.append((b['pos'][1], b['pos'][0], b['pos'][2], ns(b['nbt']['LootTable']) if 'LootTable' in b['nbt'] else '-'))
+        cont.sort(key=lambda c: (c[0], c[1], c[2]))
+        templates.append({'name': loc, 'size': d['size'], 'jig': jig, 'cont': cont})
         return tpl_idx[loc]
 
     def element(e):
@@ -679,6 +795,7 @@ def jigsaw_section(jar, version, jigsaw_structs):
         sizes = [ybox(e) for e, _ in p['entries'] if elements[e][0] != 'empty']
         out.append(f'{p["name"]} {p["fb"]} {max(sizes) if sizes else 0} {len(p["entries"])} ' +
                    ' '.join(f'{e} {wt}' for e, wt in p['entries']))
+    jigsaw_section.templates = templates  # for loot_section
     out.append(f'jigsaw_structures {len(structs)}')
     for (sname, sp, sj, size, h, v, hk, proj, exp, pb, pt, al) in structs:
         out.append(f'{sname} {sp} {sj} {size} {h} {v} {hk[0]} {hk[1]} {hk[2]} {proj} {exp} {pb} {pt} {al}')
@@ -787,6 +904,8 @@ def main():
     out.extend(jigsaw_section(jar, version, [n for n, e in structs.items() if e['type'] == 'jigsaw']))
     if not legacy:  # exact terrain heights (26.3 float samplers); after jigsaw so older loaders ignore it
         out.extend(terrain_section(jar, ns))
+    # chest loot (container lists per jigsaw template, loot tables); found by scanning for its header line
+    out.extend(loot_section(jar, jigsaw_section.templates, structure_steps(jar)))
     open(out_path, 'w').write('\n'.join(out) + '\n')
     print(f'{out_path}: {len(biome_ids)} biomes, {len(params)} params, {len(dfc.ops)} ops, {len(dfc.noises)} noises, '
           f'{len(sets)} structure sets')

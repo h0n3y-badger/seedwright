@@ -26,5 +26,7 @@ for seed in "$@"; do
 	[[ -n "$f" ]] && mv -f "$f" "$out/" && echo "ok $seed"
 	f=$(ls -t "$root"/run/villages-*.txt 2>/dev/null | head -1 || true)  # only with villages=R in the options
 	[[ -n "$f" ]] && mv -f "$f" "$out/" && echo "ok $seed villages"
+	f=$(ls -t "$root"/run/loot-*.txt 2>/dev/null | head -1 || true)  # only with loot=R in the options
+	[[ -n "$f" ]] && mv -f "$f" "$out/" && echo "ok $seed loot"
 	cp -f "$root/run/biome_parameters.txt" "$out/" 2>/dev/null || true
 done

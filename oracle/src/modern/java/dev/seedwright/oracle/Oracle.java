@@ -208,5 +208,20 @@ public final class Oracle
 			}
 			JigsawDump.dump(level, generator, randomState, state, seed, villages, Oracle::id, names);
 		}
+
+		// ---- chest loot (villages, buried treasure): -Dseedwright.oracle.loot=R ----
+		int loot = Integer.getInteger("seedwright.oracle.loot", 0);
+		if (loot > 0)
+		{
+			Map<Structure, String> names = new java.util.IdentityHashMap<>();
+			for (Holder<StructureSet> set : state.possibleStructureSets())
+			{
+				for (StructureSet.StructureSelectionEntry e : set.value().structures())
+				{
+					names.put(e.structure().value(), id(e.structure()));
+				}
+			}
+			LootDump.dump(level, state, seed, loot, Oracle::id, names);
+		}
 	}
 }

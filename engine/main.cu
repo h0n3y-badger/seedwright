@@ -6,6 +6,7 @@
 #include "jigsaw_cli.h"
 #include "crack_cli.h"
 #include "layout.h"
+#include "loot_cli.h"
 #include <chrono>
 #include <random>
 #include <functional>
@@ -240,6 +241,23 @@ static const JigsawHost& jig(const Pack& P) {
 	return *gJig;
 }
 
+// chest loot tables (pack "loot" section), loaded once; ok == false when the pack predates them
+static std::string gPackPath;
+static LootHost* gLoot = nullptr;
+static const LootHost& lootHost(const Pack& P) {
+	if (!gLoot) {
+		gLoot = new LootHost();
+		try {
+			*gLoot = buildLoot(P, gPackPath.c_str());
+		} catch (std::exception& e) {
+			fprintf(stderr, "warning: loot section unreadable (%s); loot conditions unavailable\n", e.what());
+			*gLoot = LootHost();
+		}
+	}
+	return *gLoot;
+}
+static const LootTables* lootTables(const Pack& P) { return lootHost(P).ok ? lootHost(P).t.get() : nullptr; }
+
 static QueryNames queryNames(const Pack& P) {
 	QueryNames N;
 	N.P = &P;
@@ -248,6 +266,28 @@ static QueryNames queryNames(const Pack& P) {
 		N.buildings.resize(P.structures.size());
 		for (size_t st = 0; st < P.structures.size() && st < 64; st++)
 			for (auto& name : jigsawCategories(H, (int)st)) N.buildings[st].push_back({name, H.categoryIndex(name)});
+	}
+	// loot: which items each structure's (supported) loot tables can give
+	const LootHost& LH = lootHost(P);
+	if (LH.ok) {
+		const LootTables& L = *LH.t;
+		N.lootItems = LH.items;
+		N.lootGives.assign(P.structures.size(), {});
+		N.lootJig.assign(P.structures.size(), 0);
+		auto addTable = [&](int st, int table) {
+			if (table < 0 || !L.t[table].ok) return;
+			if (N.lootGives[st].empty()) N.lootGives[st].assign(LH.items.size(), 0);
+			for (int i = 0; i < (int)LH.items.size(); i++)
+				if (lootCanGive(L, table, i)) N.lootGives[st][i] = 1;
+		};
+		for (size_t st = 0; st < P.structures.size() && st < MAX_STRUCTS; st++) {
+			if ((int)st == L.buriedSt) addTable((int)st, L.buried);
+			int js = H.t ? H.t->structOf[st] : -1;
+			if (js < 0 || L.step[st] < 0) continue;
+			N.lootJig[st] = 1;
+			for (int t : H.structTemplates[js])
+				for (int c = 0; c < L.tnc[t]; c++) addTable((int)st, L.c[L.tc0[t] + c].table);
+		}
 	}
 	return N;
 }
@@ -354,6 +394,12 @@ static Query parseQuery(const Pack& P, const StructTables& T, std::vector<std::s
 static std::string hitName(const Pack& P, int what) {
 	if (what >= 0) return P.structures[what].name.substr(10);
 	if (what == WHAT_STRONGHOLD) return "stronghold";
+	if (what <= WHAT_LOOT0) {  // item * 64 + count (63 = 63 or more)
+		int code = WHAT_LOOT0 - what, item = code / 64, n = code % 64;
+		const LootHost& L = lootHost(P);
+		std::string nm = item < (int)L.items.size() ? L.items[item].substr(L.items[item].find(':') + 1) : "item";
+		return "chest:" + nm + "=" + std::to_string(n) + (n == 63 ? "+" : "");
+	}
 	if (what <= WHAT_BUILDING0) {
 		int cat = WHAT_BUILDING0 - what;
 		return gJig && cat < (int)gJig->categories.size() ? buildingKey(gJig->categories[cat]) : "building";
@@ -409,7 +455,7 @@ static bool stageBExact(const Pack& P, const StructTables& T, const Query& q, co
 	TerrainWorld tw(TR, seed);
 	HeightGrid g = terrainGrid(tw);
 	pcs.resize(1024);  // no device stack limit here: never truncate a big village (they reach ~300)
-	return stageB(w, *P.dev, T, q, h, jig(P).t.get(), pcs.data(), &g, false, (int)pcs.size());
+	return stageB(w, *P.dev, T, q, h, jig(P).t.get(), pcs.data(), &g, false, (int)pcs.size(), lootTables(P));
 }
 
 // --layout: generate structure seeds from the query's required structure positions instead of scanning
@@ -428,6 +474,7 @@ static bool layoutPlan(const Pack& P, const StructTables& T, const Query& q, std
 
 static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt, const Terrain* TR) {
 	const JigsawTables* J = jig(P).t.get();
+	const LootTables* LT = lootTables(P);
 	const PackDev& pk = *P.dev;
 	long long maxResults = opt.count("max") ? std::stoll(opt["max"]) : 20;
 	std::atomic<long long> found{0};
@@ -438,7 +485,7 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 			Hit h;
 			std::vector<Piece> pcs(q.hasBuildings ? MAX_PIECES : 0);
 			// q.exact: no stage A / slack prefilter for given seeds
-			bool ok = TR ? stageBExact(P, T, q, *TR, s, *w, pcs, h) : stageB(*w, pk, T, q, h, J, pcs.data());
+			bool ok = TR ? stageBExact(P, T, q, *TR, s, *w, pcs, h) : stageB(*w, pk, T, q, h, J, pcs.data(), nullptr, false, MAX_PIECES, lootTables(P));
 			if (ok && opt.count("check-stage-a") && !stageA(T, q, (uint64_t)s)) printf("STAGE-A-UNSOUND %lld\n", (long long)s);  // test aid
 			if (ok) printHit(P, h);
 			else printf("%lld  no match\n", (long long)s);
@@ -529,7 +576,7 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 					worldInit(*w, pk, s);
 					Hit h;
 					// buildings: estimated-terrain prefilter, then the exact check
-					bool ok = stageB(*w, pk, T, q, h, J, pcs.data(), nullptr, TR != nullptr);
+					bool ok = stageB(*w, pk, T, q, h, J, pcs.data(), nullptr, TR != nullptr, MAX_PIECES, LT);
 					if (ok && TR) ok = stageBExact(P, T, q, *TR, s, *w, pcs, h);
 					if (ok && found++ < maxResults) {
 						std::lock_guard<std::mutex> g(mu);
@@ -566,12 +613,12 @@ __global__ void kStageA(const StructTables* T, const Query* q, uint64_t start, u
 }
 
 __global__ void kStageB(const PackDev* pk, const StructTables* T, const Query* q, const int64_t* seeds, unsigned n, World* worlds, Hit* hits, unsigned* nhits, unsigned cap,
-                        const JigsawTables* J, Piece* pieces, int prefilter) {
+                        const JigsawTables* J, Piece* pieces, int prefilter, const LootTables* L) {
 	World& w = worlds[blockIdx.x * blockDim.x + threadIdx.x];
 	for (unsigned i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {
 		worldInit(w, *pk, seeds[i]);
 		Hit h;
-		if (stageB(w, *pk, *T, *q, h, J, pieces ? pieces + (size_t)(blockIdx.x * blockDim.x + threadIdx.x) * MAX_PIECES : nullptr, nullptr, prefilter != 0)) {
+		if (stageB(w, *pk, *T, *q, h, J, pieces ? pieces + (size_t)(blockIdx.x * blockDim.x + threadIdx.x) * MAX_PIECES : nullptr, nullptr, prefilter != 0, MAX_PIECES, L)) {
 			unsigned k = atomicAdd(nhits, 1u);
 			if (k < cap) hits[k] = h;
 		}
@@ -605,6 +652,11 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		CK(cudaMemcpy(dJ, J, sizeof(JigsawTables), cudaMemcpyHostToDevice));
 		if (q.hasBuildings) CK(cudaMalloc(&dPieces, sizeof(Piece) * MAX_PIECES * (size_t)nWorlds));
 	}
+	LootTables* dLoot = nullptr;  // chest loot tables (buried treasure is decided on the GPU; villages on the CPU)
+	if (const LootTables* L = lootTables(P)) {
+		CK(cudaMalloc(&dLoot, sizeof(LootTables)));
+		CK(cudaMemcpy(dLoot, L, sizeof(LootTables), cudaMemcpyHostToDevice));
+	}
 	const unsigned long long capA = 1ull << 22;
 	const unsigned batch = 1u << 18;
 	const unsigned capH = batch;  // every seed of a batch can match: never redo a launch (a common biome matches most seeds)
@@ -625,7 +677,7 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 	std::function<void(const std::vector<int64_t>&, size_t, unsigned)> launch = [&](const std::vector<int64_t>& seeds, size_t off, unsigned n) {
 		CK(cudaMemcpy(dSeeds, seeds.data() + off, sizeof(int64_t) * n, cudaMemcpyHostToDevice));
 		CK(cudaMemset(dNH, 0, 4));
-		kStageB<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dHits, dNH, capH, dJ, dPieces, TR != nullptr);
+		kStageB<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dHits, dNH, capH, dJ, dPieces, TR != nullptr, dLoot);
 		CK(cudaGetLastError());
 		unsigned nh;
 		CK(cudaMemcpy(&nh, dNH, 4, cudaMemcpyDeviceToHost));
@@ -731,12 +783,14 @@ int main(int argc, char** argv) {
 		fprintf(stderr, "usage: seedwright <pack> verify <oracle files...>\n       seedwright <pack> search ...\n       seedwright <pack> list\n       seedwright <pack> parse '<query>'\n");
 		return 2;
 	}
+	gPackPath = argv[1];
 	Pack P = loadPack(argv[1]);
 	StructTables T = buildTables(P);
 	std::string cmd = argv[2];
 	if (cmd == "verify") return verify(P, T, std::vector<std::string>(argv + 3, argv + argc));
 	if (cmd == "crack") return crackCommand(P, T, jig(P).t.get(), argc, argv);  // world seed from structures seen in a world
-	if (cmd.rfind("village", 0) == 0) return jigsawCommand(P, T, argc, argv);  // village, village-categories, village-verify, village-bench
+	if (cmd.rfind("village", 0) == 0) return jigsawCommand(P, T, argc, argv);
+	if (cmd == "loot" || cmd == "loot-verify") return lootCommand(P, jig(P).t.get(), argc, argv);  // chest loot (loot_cli.h)  // village, village-categories, village-verify, village-bench
 	if (cmd == "list") {  // machine-readable names for front ends: "set NAME", "structure SET NAME", "biome NAME"
 		for (auto& s : P.sets) {
 			printf("set %s\n", s.name.c_str());

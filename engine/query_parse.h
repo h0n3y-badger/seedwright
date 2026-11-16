@@ -12,6 +12,8 @@
 //            | [COUNT] 'stronghold'[s] 'within' N [ '{' or '}' ]
 //            | [COUNT] STRUCTURE 'within' N [ '{' or '}' ]
 //            | [COUNT] ['building'] CATEGORY             (only inside a village's braces)
+//            | 'loot' [COUNT] ITEM                       (inside a village's or buried treasure's braces: that many
+//                                                          of the item in its chests, e.g. 'loot 2 diamond')
 //
 // STRUCTURE is a structure set ("villages", "village"), an exact structure ("village_plains"), or a
 // pattern with '*' ("village_*", "*ruin*"). Everything inside '{ }' is measured from that structure.
@@ -49,6 +51,11 @@ struct QueryNames {
 	const Pack* P;
 	// building category names per pack structure index (empty: no village layouts in this pack/build)
 	std::vector<std::vector<std::pair<std::string, int>>> buildings;
+	// chest loot (loot.h): item names, per pack structure which items its chests can hold and whether it needs a
+	// jigsaw layout (villages) or not (buried treasure); empty: no loot section in this pack
+	std::vector<std::string> lootItems;
+	std::vector<std::vector<char>> lootGives;
+	std::vector<char> lootJig;
 };
 
 class QueryParser {
@@ -261,6 +268,43 @@ private:
 		expect("}");
 		return g;
 	}
+	int lootNode(int count, uint64_t structCtx) {
+		std::string name = word();
+		if (structCtx == 0) { pos--; fail("loot only works inside a structure's { } (village, buried_treasure)"); }
+		if (N.lootItems.empty()) { pos--; fail("this pack has no loot data (rebuild it with tools/build-packs.sh)"); }
+		auto find = [&](const std::string& n) {
+			for (size_t i = 0; i < N.lootItems.size(); i++)
+				if (N.lootItems[i] == n || N.lootItems[i] == "minecraft:" + n) return (int)i;
+			return -1;
+		};
+		int item = find(name);
+		if (item < 0 && name.size() > 1 && name.back() == 's') item = find(name.substr(0, name.size() - 1));  // "diamonds"
+		bool anyLoot = false, gives = false, jig = false;
+		std::vector<std::string> can;
+		for (int st = 0; st < 64 && st < (int)N.lootGives.size(); st++) {
+			if (!((structCtx >> st) & 1) || N.lootGives[st].empty()) continue;
+			anyLoot = true;
+			jig |= N.lootJig[st] != 0;
+			if (item >= 0 && N.lootGives[st][item]) gives = true;
+			for (size_t i = 0; i < N.lootGives[st].size(); i++)
+				if (N.lootGives[st][i] && std::find(can.begin(), can.end(), N.lootItems[i]) == can.end()) can.push_back(N.lootItems[i]);
+		}
+		if (!anyLoot) { pos--; fail("no loot data for this structure (loot works in villages and buried treasure)"); }
+		if (!gives) {
+			std::sort(can.begin(), can.end());
+			std::string list;
+			for (auto& c : can) list += (list.empty() ? "" : ", ") + c.substr(c.find(':') + 1);
+			pos--;
+			fail("no '" + name + "' in this structure's chests (they can hold: " + list + ")");
+		}
+		int n = newNode(N_LOOT);
+		label[n] = N.lootItems[item].substr(N.lootItems[item].find(':') + 1);
+		q.n[n].count = count;
+		q.n[n].item = item;
+		q.n[n].lootJig = jig ? 1 : 0;
+		if (jig) q.hasBuildings = 1;  // village layouts, exact check like buildings
+		return n;
+	}
 	int parseAtom(int depth, uint64_t structCtx) {
 		if (depth > MAX_DEPTH) fail("nested too deep (max " + std::to_string(MAX_DEPTH) + ")");
 		if (accept("(")) {
@@ -296,10 +340,13 @@ private:
 			return n;
 		}
 		int count = 1;
-		if (pos < toks.size() && isInt(toks[pos].s)) {
-			count = number("a count");
-			if (count < 1 || count > 64) fail("count must be 1..64");
+		if (pos < toks.size() && isInt(toks[pos].s)) count = number("a count");
+		if (accept("loot")) {
+			if (pos < toks.size() && isInt(toks[pos].s)) count = number("a count");
+			if (count < 1 || count > 9999) fail("count must be 1..9999");
+			return lootNode(count, structCtx);
 		}
+		if (count < 1 || count > 64) fail("count must be 1..64");
 		bool isBuilding = accept("building") || accept("buildings");
 		std::string name = word();
 		if (!isBuilding && (name == "stronghold" || name == "strongholds")) {
@@ -381,6 +428,9 @@ inline std::string queryText(const Pack& P, const Query& q, int ni, const QueryN
 	case N_STRONGHOLD: return std::to_string(n.count) + " stronghold within " + std::to_string(n.radius) + braces();
 	case N_SPAWN: return "spawn within " + std::to_string(n.radius);
 	case N_BUILDING: return std::to_string(n.count) + " " + (label && !label[ni].empty() ? label[ni] : "building");
+	case N_LOOT:
+		return "loot " + std::to_string(n.count) + " " +
+		       (label && !label[ni].empty() ? label[ni] : n.item < (int)N.lootItems.size() ? N.lootItems[n.item].substr(N.lootItems[n.item].find(':') + 1) : "item");
 	}
 	return "?";
 }
@@ -388,7 +438,7 @@ inline std::string queryText(const Pack& P, const Query& q, int ni, const QueryN
 // JSON tree for front ends: {"kind": ..., "name": ..., "count": .., "radius": .., "y": .., "children": [..]}
 inline std::string queryJson(const Pack& P, const Query& q, int ni, const QueryNames& N, const std::string* label) {
 	const Node& n = q.n[ni];
-	static const char* kinds[] = {"all", "any", "not", "structure", "biome", "stronghold", "spawn", "building"};
+	static const char* kinds[] = {"all", "any", "not", "structure", "biome", "stronghold", "spawn", "building", "loot"};
 	auto esc = [](const std::string& s) {
 		std::string o;
 		for (char c : s) o += (c == '"' || c == '\\') ? std::string("\\") + c : std::string(1, c);
@@ -405,7 +455,9 @@ inline std::string queryJson(const Pack& P, const Query& q, int ni, const QueryN
 		j += ", \"name\": \"" + esc(nm) + "\"";
 	}
 	if (n.kind == N_BIOME) j += ", \"name\": \"" + esc(P.biomes[n.biome].substr(10)) + "\", \"y\": " + (n.y == Y_ANY ? std::string("\"any\"") : std::to_string(n.y));
-	if (n.kind == N_STRUCTURE || n.kind == N_STRONGHOLD || n.kind == N_BUILDING) j += ", \"count\": " + std::to_string(n.count);
+	if (n.kind == N_LOOT)
+		j += ", \"name\": \"" + esc(n.item < (int)N.lootItems.size() ? N.lootItems[n.item].substr(N.lootItems[n.item].find(':') + 1) : "?") + "\"";
+	if (n.kind == N_STRUCTURE || n.kind == N_STRONGHOLD || n.kind == N_BUILDING || n.kind == N_LOOT) j += ", \"count\": " + std::to_string(n.count);
 	if (n.kind == N_STRUCTURE || n.kind == N_STRONGHOLD || n.kind == N_BIOME || n.kind == N_SPAWN) j += ", \"radius\": " + std::to_string(n.radius);
 	if (n.kind == N_ALL || n.kind == N_ANY || n.kind == N_NOT || n.kind == N_STRUCTURE || n.kind == N_STRONGHOLD) {
 		j += ", \"children\": [";

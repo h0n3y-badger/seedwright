@@ -1,0 +1,59 @@
+seed 31337
+order minecraft:abandoned_camp_bamboo_jungle 4 0
+order minecraft:abandoned_camp_birch_forest 4 1
+order minecraft:abandoned_camp_cherry_grove 4 2
+order minecraft:abandoned_camp_dappled_forest 4 3
+order minecraft:abandoned_camp_flower_forest 4 4
+order minecraft:abandoned_camp_forest 4 5
+order minecraft:abandoned_camp_meadow 4 6
+order minecraft:abandoned_camp_old_growth_birch_forest 4 7
+order minecraft:abandoned_camp_old_growth_pine_taiga 4 8
+order minecraft:abandoned_camp_old_growth_spruce_taiga 4 9
+order minecraft:abandoned_camp_pale_garden 4 10
+order minecraft:abandoned_camp_savanna 4 11
+order minecraft:abandoned_camp_snowy_taiga 4 12
+order minecraft:abandoned_camp_sparse_jungle 4 13
+order minecraft:abandoned_camp_swamp 4 14
+order minecraft:abandoned_camp_taiga 4 15
+order minecraft:abandoned_camp_windswept_forest 4 16
+order minecraft:abandoned_camp_wooded_badlands 4 17
+order minecraft:ancient_city 7 0
+order minecraft:bastion_remnant 4 18
+order minecraft:buried_treasure 3 0
+order minecraft:desert_pyramid 4 19
+order minecraft:end_city 4 20
+order minecraft:fortress 7 1
+order minecraft:igloo 4 21
+order minecraft:jungle_pyramid 4 22
+order minecraft:mansion 4 23
+order minecraft:mineshaft 3 1
+order minecraft:mineshaft_mesa 3 2
+order minecraft:monument 4 24
+order minecraft:nether_fossil 7 2
+order minecraft:ocean_ruin_cold 4 25
+order minecraft:ocean_ruin_warm 4 26
+order minecraft:pillager_outpost 4 27
+order minecraft:ruined_portal 4 28
+order minecraft:ruined_portal_desert 4 29
+order minecraft:ruined_portal_jungle 4 30
+order minecraft:ruined_portal_mountain 4 31
+order minecraft:ruined_portal_nether 4 32
+order minecraft:ruined_portal_ocean 4 33
+order minecraft:ruined_portal_swamp 4 34
+order minecraft:shipwreck 4 35
+order minecraft:shipwreck_beached 4 36
+order minecraft:stronghold 4 37
+order minecraft:swamp_hut 4 38
+order minecraft:trail_ruins 3 3
+order minecraft:trial_chambers 3 4
+order minecraft:village_desert 4 39
+order minecraft:village_plains 4 40
+order minecraft:village_savanna 4 41
+order minecraft:village_snowy 4 42
+order minecraft:village_taiga 4 43
+structure minecraft:village_plains 24 -21
+container 390 119 -290 minecraft:chests/village/village_plains_house 4330181770429590674 minecraft:book=1 minecraft:bread=1 minecraft:potato=2
+container 419 111 -259 minecraft:chests/abandoned_camp_common_chest 7339668980196161866 minecraft:abandoned_camp_map=1 minecraft:bow=1 minecraft:copper_chestplate=1 minecraft:gunpowder=3 minecraft:lead=2 minecraft:leather=1 minecraft:rabbit_hide=2
+container 423 111 -253 minecraft:chests/abandoned_camp_common_chest -5754609046872819680 minecraft:abandoned_camp_map=1 minecraft:bucket=1 minecraft:bundle=1 minecraft:cobweb=1 minecraft:copper_boots=1 minecraft:leather=3 minecraft:rabbit_hide=1
+container 423 111 -252 minecraft:chests/abandoned_camp_common_chest -4862743811588886771 minecraft:abandoned_camp_map=1 minecraft:copper_axe=1 minecraft:copper_chestplate=1 minecraft:flint_and_steel=1 minecraft:glass_bottle=1 minecraft:map=1 minecraft:rabbit_hide=2
+end 4

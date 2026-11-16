@@ -1,0 +1,161 @@
+seed -3777394187457003518
+order minecraft:abandoned_camp_bamboo_jungle 4 0
+order minecraft:abandoned_camp_birch_forest 4 1
+order minecraft:abandoned_camp_cherry_grove 4 2
+order minecraft:abandoned_camp_dappled_forest 4 3
+order minecraft:abandoned_camp_flower_forest 4 4
+order minecraft:abandoned_camp_forest 4 5
+order minecraft:abandoned_camp_meadow 4 6
+order minecraft:abandoned_camp_old_growth_birch_forest 4 7
+order minecraft:abandoned_camp_old_growth_pine_taiga 4 8
+order minecraft:abandoned_camp_old_growth_spruce_taiga 4 9
+order minecraft:abandoned_camp_pale_garden 4 10
+order minecraft:abandoned_camp_savanna 4 11
+order minecraft:abandoned_camp_snowy_taiga 4 12
+order minecraft:abandoned_camp_sparse_jungle 4 13
+order minecraft:abandoned_camp_swamp 4 14
+order minecraft:abandoned_camp_taiga 4 15
+order minecraft:abandoned_camp_windswept_forest 4 16
+order minecraft:abandoned_camp_wooded_badlands 4 17
+order minecraft:ancient_city 7 0
+order minecraft:bastion_remnant 4 18
+order minecraft:buried_treasure 3 0
+order minecraft:desert_pyramid 4 19
+order minecraft:end_city 4 20
+order minecraft:fortress 7 1
+order minecraft:igloo 4 21
+order minecraft:jungle_pyramid 4 22
+order minecraft:mansion 4 23
+order minecraft:mineshaft 3 1
+order minecraft:mineshaft_mesa 3 2
+order minecraft:monument 4 24
+order minecraft:nether_fossil 7 2
+order minecraft:ocean_ruin_cold 4 25
+order minecraft:ocean_ruin_warm 4 26
+order minecraft:pillager_outpost 4 27
+order minecraft:ruined_portal 4 28
+order minecraft:ruined_portal_desert 4 29
+order minecraft:ruined_portal_jungle 4 30
+order minecraft:ruined_portal_mountain 4 31
+order minecraft:ruined_portal_nether 4 32
+order minecraft:ruined_portal_ocean 4 33
+order minecraft:ruined_portal_swamp 4 34
+order minecraft:shipwreck 4 35
+order minecraft:shipwreck_beached 4 36
+order minecraft:stronghold 4 37
+order minecraft:swamp_hut 4 38
+order minecraft:trail_ruins 3 3
+order minecraft:trial_chambers 3 4
+order minecraft:village_desert 4 39
+order minecraft:village_plains 4 40
+order minecraft:village_savanna 4 41
+order minecraft:village_snowy 4 42
+order minecraft:village_taiga 4 43
+structure minecraft:buried_treasure -28 -22
+container -439 48 -343 minecraft:chests/buried_treasure -8336898148647789306 minecraft:cooked_cod=2 minecraft:cooked_salmon=2 minecraft:diamond=2 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=10 minecraft:potion=1 minecraft:tnt=2
+structure minecraft:buried_treasure -12 35
+container -183 54 569 minecraft:chests/buried_treasure 8465164905848265109 minecraft:cooked_salmon=7 minecraft:diamond=1 minecraft:gold_ingot=5 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=3 minecraft:iron_sword=1 minecraft:prismarine_crystals=5 minecraft:tnt=1
+structure minecraft:buried_treasure 2 28
+container 41 61 457 minecraft:chests/buried_treasure -7876402850823367462 minecraft:cooked_cod=6 minecraft:emerald=4 minecraft:gold_ingot=10 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=8 minecraft:iron_sword=1 minecraft:potion=1
+structure minecraft:buried_treasure 4 29
+container 73 56 473 minecraft:chests/buried_treasure -1817051059799934729 minecraft:cooked_cod=4 minecraft:cooked_salmon=4 minecraft:diamond=2 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=10 minecraft:leather_chestplate=1 minecraft:potion=2 minecraft:prismarine_crystals=7 minecraft:tnt=1
+structure minecraft:village_plains -26 15
+container -484 -36 183 minecraft:pots/trial_chambers/corridor -7549987449301065125 minecraft:arrow=4
+container -482 -31 205 minecraft:chests/trial_chambers/intersection_barrel 7676468599011479849 minecraft:baked_potato=6 minecraft:bamboo_planks=10 minecraft:golden_pickaxe=1
+container -480 -36 174 minecraft:pots/trial_chambers/corridor -6036352116261426494 minecraft:arrow=4
+container -478 -34 172 minecraft:pots/trial_chambers/corridor 5080787414055248751 minecraft:iron_ingot=2
+container -475 -34 174 minecraft:pots/trial_chambers/corridor -4785504571344653476 minecraft:emerald=3
+container -479 -29 173 minecraft:chests/trial_chambers/corridor -8150421964554531955 minecraft:bamboo_planks=3 minecraft:scaffolding=9 minecraft:tuff=20
+container -475 -29 174 minecraft:pots/trial_chambers/corridor 2797405639744908570 minecraft:iron_ingot=2
+container -475 -29 175 minecraft:pots/trial_chambers/corridor 5568010713596737604 minecraft:emerald=2
+container -478 -34 176 minecraft:pots/trial_chambers/corridor 5901727431239996218 minecraft:iron_ingot=2
+container -479 -29 178 minecraft:pots/trial_chambers/corridor 3525795647090856313 minecraft:iron_ingot=1
+container -479 -29 183 minecraft:pots/trial_chambers/corridor 8109278255472162329 minecraft:emerald=1
+container -472 -29 179 minecraft:chests/trial_chambers/reward 4133678841195892133 minecraft:golden_apple=1 minecraft:iron_chestplate=1 minecraft:wind_charge=1
+container -467 -36 197 minecraft:pots/trial_chambers/corridor 5430714918135703195 minecraft:arrow=6
+container -466 -36 197 minecraft:pots/trial_chambers/corridor 4767895108709956471 minecraft:emerald=2
+container -465 -36 197 minecraft:pots/trial_chambers/corridor -3783121040109920768 minecraft:emerald_block=1
+container -467 -34 192 minecraft:pots/trial_chambers/corridor 3704696921892900698 minecraft:emerald=1
+container -467 -34 193 minecraft:chests/simple_dungeon 5111721665764299342 minecraft:bone=13 minecraft:bucket=1 minecraft:copper_horse_armor=1 minecraft:name_tag=1 minecraft:string=8
+container -465 -34 192 minecraft:pots/trial_chambers/corridor -7747822088386882283 minecraft:emerald=3
+container -465 -34 206 minecraft:pots/trial_chambers/corridor 2616865166297602171 minecraft:arrow=7
+container -474 -31 195 none -8220989169739097014
+container -467 -29 202 minecraft:pots/trial_chambers/corridor 3371705209310871438 minecraft:arrow=7
+container -465 -29 202 minecraft:chests/trial_chambers/corridor -4860474434270388864 minecraft:bamboo_hanging_sign=3
+container -465 -29 206 minecraft:pots/trial_chambers/corridor -5289729303225941308 minecraft:emerald=1
+container -466 -47 214 none 4181638098503269822
+container -468 -53 228 none 6735057906619403870
+container -468 -52 228 none 7433920461328917376
+container -464 -53 200 none 2291316360262228278
+container -464 -52 200 none 1324475489361280542
+container -457 -36 201 minecraft:pots/trial_chambers/corridor 6005344391161532575 minecraft:trial_key=1
+container -456 -36 197 minecraft:pots/trial_chambers/corridor -3150644492026166265 minecraft:emerald=2
+container -455 -36 201 minecraft:pots/trial_chambers/corridor -1730796322342164244 minecraft:emerald=3
+container -452 -36 197 minecraft:pots/trial_chambers/corridor -6421475287646219460 minecraft:emerald=1
+container -450 -36 201 minecraft:pots/trial_chambers/corridor 4607633706968939501 minecraft:iron_ingot=2
+container -464 -34 195 minecraft:chests/trial_chambers/corridor 301121628679569217 minecraft:torch=6
+container -461 -34 192 minecraft:pots/trial_chambers/corridor -2045880152155376226 minecraft:emerald=3
+container -460 -34 206 minecraft:pots/trial_chambers/corridor 4695847295330272090 minecraft:iron_ingot=1
+container -458 -34 195 minecraft:pots/trial_chambers/corridor -1030688166419631908 minecraft:arrow=2
+container -458 -34 203 minecraft:pots/trial_chambers/corridor 3714140884733470876 minecraft:iron_ingot=1
+container -455 -34 206 minecraft:pots/trial_chambers/corridor 2732370518321612526 minecraft:iron_ingot=2
+container -454 -34 195 minecraft:pots/trial_chambers/corridor 7767017857759303043 minecraft:iron_ingot=1
+container -452 -34 206 minecraft:chests/trial_chambers/corridor 6249081711597441305 minecraft:bamboo_hanging_sign=1
+container -450 -29 202 minecraft:pots/trial_chambers/corridor 938861938255836546 minecraft:iron_ingot=1
+container -450 -29 206 minecraft:pots/trial_chambers/corridor -3668896185698159836 minecraft:emerald=2
+container -452 -48 216 none 7101309855169127844
+container -452 -47 216 none -6895962450549372217
+container -449 -30 209 none -1676487335698931766
+container -449 -29 209 none -8240932209569356974
+container -451 -24 223 none -1529237481726252539
+container -453 -30 237 none 6307347400276137456
+container -453 -29 237 none 1274047246705200612
+container -437 -25 225 none -4569795288081823619
+container -437 -24 225 none 5318554016779846178
+container -428 -32 197 none -5829107950503631115
+container -428 -31 197 none 5301172443842689162
+container -428 -31 204 minecraft:dispensers/trial_chambers/chamber -6024460672913744037 minecraft:lingering_potion=2
+container -417 -37 212 none -1270289994246915707
+container -417 -36 212 none -1542083932322846350
+container -413 -32 191 none 1774213751325590462
+container -413 -31 191 none 6173788253654670721
+container -410 -31 191 minecraft:dispensers/trial_chambers/chamber -3996903189012157421 minecraft:arrow=8
+container -405 -31 191 minecraft:dispensers/trial_chambers/chamber 4120083743846185066 minecraft:fire_charge=5
+container -406 -41 204 minecraft:dispensers/trial_chambers/chamber 6938631262146701704 minecraft:snowball=5
+container -402 -32 201 none 977851422956767381
+container -402 -31 201 none 5120123251922624949
+container -402 -31 204 minecraft:dispensers/trial_chambers/chamber 5225972571103085129 minecraft:snowball=4
+container -415 -31 212 minecraft:dispensers/trial_chambers/chamber -6141223141140323121 minecraft:splash_potion=5
+container -405 -31 212 minecraft:dispensers/trial_chambers/chamber -4096546017119147106 minecraft:snowball=7
+container -403 67 274 minecraft:chests/village/village_weaponsmith -8314478317737771665 minecraft:bread=3 minecraft:bundle=1 minecraft:diamond=1 minecraft:iron_chestplate=1 minecraft:iron_helmet=1
+container -353 23 174 minecraft:chests/simple_dungeon -5870534729814798994 minecraft:coal=1 minecraft:copper_horse_armor=1 minecraft:gunpowder=7 minecraft:leather=5 minecraft:melon_seeds=3 minecraft:string=5
+container -355 -24 214 minecraft:chests/simple_dungeon 8236427724820383831 minecraft:bone=7 minecraft:bread=1 minecraft:golden_apple=1 minecraft:gunpowder=1 minecraft:music_disc_cat=1 minecraft:rotten_flesh=2 minecraft:wheat=3
+container -351 23 174 minecraft:chests/simple_dungeon -202578896273100194 minecraft:beetroot_seeds=4 minecraft:bone=5 minecraft:bread=1 minecraft:golden_apple=1 minecraft:golden_horse_armor=1 minecraft:iron_ingot=3 minecraft:music_disc_13=1 minecraft:pumpkin_seeds=3 minecraft:string=9
+container -332 -54 297 minecraft:chests/simple_dungeon 6681575742385341501 minecraft:beetroot_seeds=3 minecraft:bone=1 minecraft:gunpowder=4 minecraft:iron_ingot=1 minecraft:leather=3 minecraft:name_tag=1 minecraft:string=8
+structure minecraft:village_plains -11 -22
+container -244 4 -425 minecraft:chests/simple_dungeon 269112815871834076 minecraft:coal=1 minecraft:diamond_horse_armor=1 minecraft:enchanted_book=1 minecraft:gunpowder=2 minecraft:iron_horse_armor=1 minecraft:rotten_flesh=2 minecraft:string=1
+container -182 67 -407 minecraft:chests/village/village_plains_house -2038371687780374534 minecraft:dandelion=1 minecraft:gold_nugget=3 minecraft:oak_sapling=2 minecraft:potato=6
+container -113 -2 -395 minecraft:chests/simple_dungeon 7757291512999812213 minecraft:bread=1 minecraft:golden_horse_armor=1 minecraft:gunpowder=9 minecraft:string=6
+container -110 3 -417 minecraft:chests/simple_dungeon 34221611225318907 minecraft:bone=9 minecraft:bread=1 minecraft:gunpowder=8 minecraft:music_disc_13=1 minecraft:redstone=4
+container -108 3 -414 minecraft:chests/simple_dungeon 8512305543613090483 minecraft:bone=12 minecraft:bread=1 minecraft:music_disc_cat=1 minecraft:name_tag=2 minecraft:redstone=3 minecraft:wheat=4
+structure minecraft:village_plains 16 -27
+container 172 -50 -380 minecraft:chests/simple_dungeon 8431217943484557365 minecraft:bucket=1 minecraft:coal=2 minecraft:enchanted_book=1 minecraft:gunpowder=11 minecraft:leather=1 minecraft:string=2 minecraft:wheat=3
+container 176 -50 -377 minecraft:chests/simple_dungeon 221099139373877378 minecraft:bone=10 minecraft:copper_horse_armor=1 minecraft:golden_apple=1 minecraft:golden_horse_armor=1 minecraft:melon_seeds=4 minecraft:string=8
+container 199 67 -525 minecraft:chests/simple_dungeon -1737496801661975110 minecraft:bone=11 minecraft:gunpowder=4 minecraft:iron_horse_armor=1 minecraft:iron_ingot=4 minecraft:leather=3 minecraft:music_disc_13=1
+container 204 -34 -484 minecraft:chests/simple_dungeon -9086931175988238365 minecraft:bread=1 minecraft:copper_horse_armor=1 minecraft:enchanted_book=1 minecraft:name_tag=1 minecraft:rotten_flesh=14 minecraft:string=1
+container 206 -41 -457 minecraft:chests/ruined_portal 7877656920002993433 minecraft:fire_charge=2 minecraft:flint=2 minecraft:gold_nugget=10 minecraft:golden_chestplate=1 minecraft:golden_leggings=1 minecraft:lodestone=2
+container 193 64 -394 minecraft:chests/simple_dungeon -4754907558557068129 minecraft:beetroot_seeds=2 minecraft:bone=8 minecraft:iron_ingot=1 minecraft:music_disc_cat=1 minecraft:rotten_flesh=1 minecraft:string=1
+container 197 64 -392 minecraft:chests/simple_dungeon 7760600358657873870 minecraft:bone=1 minecraft:enchanted_book=1 minecraft:golden_apple=1 minecraft:rotten_flesh=4 minecraft:string=4 minecraft:wheat=2
+container 208 -34 -485 minecraft:chests/simple_dungeon 1085112721091309480 minecraft:beetroot_seeds=4 minecraft:bread=1 minecraft:gunpowder=1 minecraft:iron_horse_armor=1 minecraft:iron_ingot=3 minecraft:rotten_flesh=8
+container 217 -7 -451 minecraft:chests/simple_dungeon -2870288531856299828 minecraft:bone=3 minecraft:enchanted_book=1 minecraft:gunpowder=3 minecraft:leather=3 minecraft:pumpkin_seeds=4 minecraft:redstone=3 minecraft:rotten_flesh=4
+container 219 -7 -451 minecraft:chests/simple_dungeon -448445731059961032 minecraft:beetroot_seeds=3 minecraft:bone=4 minecraft:bread=1 minecraft:enchanted_book=1 minecraft:iron_ingot=2 minecraft:music_disc_cat=2 minecraft:rotten_flesh=4 minecraft:string=1
+container 208 72 -458 minecraft:chests/village/village_weaponsmith -3702244707294054108 minecraft:bread=1 minecraft:bundle=1 minecraft:copper_spear=1 minecraft:iron_chestplate=1 minecraft:iron_ingot=6 minecraft:oak_sapling=12
+container 216 65 -423 minecraft:chests/village/village_plains_house 3394943096499376271 minecraft:apple=6 minecraft:bread=3 minecraft:bundle=1 minecraft:oak_sapling=2 minecraft:potato=6
+container 239 -50 -361 minecraft:chests/simple_dungeon -2597330696553469844 minecraft:coal=3 minecraft:enchanted_book=1 minecraft:gunpowder=15 minecraft:melon_seeds=3 minecraft:rotten_flesh=8
+container 259 68 -465 minecraft:chests/village/village_weaponsmith -8034052371222193215 minecraft:diamond=3 minecraft:iron_ingot=10
+container 259 -6 -405 minecraft:chests/simple_dungeon 5606128418487977160 minecraft:beetroot_seeds=2 minecraft:bone=8 minecraft:bread=1 minecraft:diamond_horse_armor=1 minecraft:string=10
+container 261 -6 -408 minecraft:chests/simple_dungeon -5220373678247263501 minecraft:bread=1 minecraft:gold_ingot=2 minecraft:gunpowder=3 minecraft:iron_horse_armor=1 minecraft:music_disc_cat=2 minecraft:rotten_flesh=8
+container 294 67 -429 minecraft:chests/village/village_weaponsmith -7597536504090785771 minecraft:apple=2 minecraft:bread=3 minecraft:diamond=1 minecraft:iron_pickaxe=1
+container 307 -35 -427 minecraft:chests/simple_dungeon -2882173900657149902 minecraft:bone=3 minecraft:bread=1 minecraft:gold_ingot=1 minecraft:golden_horse_armor=1 minecraft:iron_ingot=4 minecraft:leather=3 minecraft:melon_seeds=2 minecraft:rotten_flesh=11
+container 311 -35 -421 minecraft:chests/simple_dungeon -6069861558306275605 minecraft:beetroot_seeds=3 minecraft:enchanted_book=1 minecraft:golden_horse_armor=1 minecraft:gunpowder=10 minecraft:iron_ingot=4 minecraft:music_disc_cat=1 minecraft:pumpkin_seeds=2 minecraft:rotten_flesh=2
+end 100

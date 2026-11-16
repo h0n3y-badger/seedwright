@@ -1,0 +1,104 @@
+seed -9145684943282634749
+order minecraft:abandoned_camp_bamboo_jungle 4 0
+order minecraft:abandoned_camp_birch_forest 4 1
+order minecraft:abandoned_camp_cherry_grove 4 2
+order minecraft:abandoned_camp_dappled_forest 4 3
+order minecraft:abandoned_camp_flower_forest 4 4
+order minecraft:abandoned_camp_forest 4 5
+order minecraft:abandoned_camp_meadow 4 6
+order minecraft:abandoned_camp_old_growth_birch_forest 4 7
+order minecraft:abandoned_camp_old_growth_pine_taiga 4 8
+order minecraft:abandoned_camp_old_growth_spruce_taiga 4 9
+order minecraft:abandoned_camp_pale_garden 4 10
+order minecraft:abandoned_camp_savanna 4 11
+order minecraft:abandoned_camp_snowy_taiga 4 12
+order minecraft:abandoned_camp_sparse_jungle 4 13
+order minecraft:abandoned_camp_swamp 4 14
+order minecraft:abandoned_camp_taiga 4 15
+order minecraft:abandoned_camp_windswept_forest 4 16
+order minecraft:abandoned_camp_wooded_badlands 4 17
+order minecraft:ancient_city 7 0
+order minecraft:bastion_remnant 4 18
+order minecraft:buried_treasure 3 0
+order minecraft:desert_pyramid 4 19
+order minecraft:end_city 4 20
+order minecraft:fortress 7 1
+order minecraft:igloo 4 21
+order minecraft:jungle_pyramid 4 22
+order minecraft:mansion 4 23
+order minecraft:mineshaft 3 1
+order minecraft:mineshaft_mesa 3 2
+order minecraft:monument 4 24
+order minecraft:nether_fossil 7 2
+order minecraft:ocean_ruin_cold 4 25
+order minecraft:ocean_ruin_warm 4 26
+order minecraft:pillager_outpost 4 27
+order minecraft:ruined_portal 4 28
+order minecraft:ruined_portal_desert 4 29
+order minecraft:ruined_portal_jungle 4 30
+order minecraft:ruined_portal_mountain 4 31
+order minecraft:ruined_portal_nether 4 32
+order minecraft:ruined_portal_ocean 4 33
+order minecraft:ruined_portal_swamp 4 34
+order minecraft:shipwreck 4 35
+order minecraft:shipwreck_beached 4 36
+order minecraft:stronghold 4 37
+order minecraft:swamp_hut 4 38
+order minecraft:trail_ruins 3 3
+order minecraft:trial_chambers 3 4
+order minecraft:village_desert 4 39
+order minecraft:village_plains 4 40
+order minecraft:village_savanna 4 41
+order minecraft:village_snowy 4 42
+order minecraft:village_taiga 4 43
+structure minecraft:village_savanna -11 36
+container -257 -41 640 minecraft:dispensers/trial_chambers/chamber 5335164560013279038 minecraft:fire_charge=7
+container -255 -37 636 none 3261693600643140740
+container -255 -36 636 none 1051377019092088175
+container -237 -42 575 minecraft:chests/simple_dungeon -4163047599340489741 minecraft:bone=1 minecraft:bucket=1 minecraft:copper_horse_armor=1 minecraft:name_tag=1 minecraft:redstone=2 minecraft:rotten_flesh=5 minecraft:string=2
+container -238 -42 580 minecraft:chests/simple_dungeon -8421902127118867326 minecraft:bone=7 minecraft:bread=2 minecraft:bucket=1 minecraft:copper_horse_armor=1 minecraft:enchanted_golden_apple=1 minecraft:golden_apple=1 minecraft:rotten_flesh=5 minecraft:string=6
+container -217 -11 511 minecraft:chests/simple_dungeon -8620454651714845663 minecraft:bone=2 minecraft:bread=1 minecraft:gunpowder=1 minecraft:music_disc_13=1 minecraft:name_tag=1 minecraft:redstone=7 minecraft:string=7
+container -215 -11 515 minecraft:chests/simple_dungeon -5462211245989628445 minecraft:bone=7 minecraft:bucket=1 minecraft:music_disc_cat=2 minecraft:rotten_flesh=6 minecraft:string=5
+container -216 69 562 minecraft:chests/village/village_tannery 8331174024255196515 minecraft:bundle=1 minecraft:leather_boots=1 minecraft:leather_helmet=1 minecraft:leather_leggings=2
+container -220 79 599 minecraft:chests/village/village_savanna_house -771574821669443221 minecraft:acacia_sapling=1 minecraft:bucket=1 minecraft:gold_nugget=3 minecraft:short_grass=1 minecraft:torch=1 minecraft:wheat_seeds=2
+container -213 79 599 minecraft:chests/village/village_savanna_house -5748128307255627618 minecraft:acacia_sapling=3 minecraft:bread=1 minecraft:short_grass=3
+container -220 -34 642 minecraft:pots/trial_chambers/corridor -4195559063297553955 minecraft:emerald=3
+container -221 -29 642 minecraft:pots/trial_chambers/corridor 6543704365105257648 minecraft:arrow=3
+container -215 -29 642 minecraft:pots/trial_chambers/corridor -6612801048481072526 minecraft:arrow=3
+container -212 -29 642 minecraft:chests/trial_chambers/corridor 1925506344445543943 minecraft:stone_axe=1
+container -219 -18 641 none -5339694364175375846
+container -219 -17 641 none -9064945469728964690
+container -202 70 564 minecraft:chests/village/village_savanna_house 7294188678912330552 minecraft:acacia_sapling=2 minecraft:bread=6 minecraft:bundle=1 minecraft:wheat_seeds=5
+container -200 74 578 minecraft:chests/village/village_cartographer 4749143620310666378 minecraft:bread=3 minecraft:bundle=1 minecraft:paper=11
+container -204 -5 606 minecraft:chests/simple_dungeon -3740806042738461468 minecraft:coal=1 minecraft:iron_horse_armor=1 minecraft:melon_seeds=2 minecraft:rotten_flesh=13 minecraft:string=6 minecraft:wheat=1
+container -197 77 637 minecraft:chests/simple_dungeon 8652462902370368022 minecraft:bone=3 minecraft:copper_horse_armor=1 minecraft:leather=2 minecraft:rotten_flesh=3 minecraft:string=7 minecraft:wheat=4
+container -206 -34 642 minecraft:chests/trial_chambers/corridor -7527541138579200890 minecraft:ender_pearl=1 minecraft:scaffolding=5 minecraft:torch=4
+container -190 74 575 minecraft:chests/village/village_cartographer 5242294562408247652 minecraft:bread=2 minecraft:compass=1 minecraft:paper=5
+container -179 -37 642 none -572696250730164834
+container -179 -36 642 none -4501457512065343376
+container -190 -31 643 minecraft:chests/trial_chambers/intersection_barrel 8468127406093924145 minecraft:baked_potato=18 minecraft:bamboo_planks=14
+container -175 -36 632 minecraft:pots/trial_chambers/corridor 24584429353626566 minecraft:iron_ingot=2
+container -159 -41 640 minecraft:pots/trial_chambers/corridor 7404773829350064757 minecraft:iron_ingot=2
+container -139 70 602 minecraft:chests/village/village_cartographer 7690157623235603674 minecraft:bread=3
+structure minecraft:village_plains -10 -16
+container -121 74 -268 minecraft:chests/village/village_plains_house -1780352962219015419 minecraft:apple=3 minecraft:bundle=1 minecraft:feather=1 minecraft:oak_sapling=4 minecraft:potato=9
+container -110 -22 -316 minecraft:chests/simple_dungeon 618947829024534811 minecraft:beetroot_seeds=3 minecraft:bone=10 minecraft:coal=4 minecraft:name_tag=1 minecraft:pumpkin_seeds=2 minecraft:rotten_flesh=8
+container -106 -22 -315 minecraft:chests/simple_dungeon 853209182526079302 minecraft:leather=5 minecraft:pumpkin_seeds=4 minecraft:rotten_flesh=4 minecraft:string=6
+container -102 70 -268 minecraft:chests/village/village_plains_house 7585178327821430608 minecraft:apple=2 minecraft:bread=3
+container -96 72 -228 minecraft:chests/village/village_plains_house 5167798997768982060 minecraft:apple=3 minecraft:bread=6 minecraft:potato=7
+structure minecraft:village_savanna 18 -21
+container 197 -34 -269 minecraft:chests/simple_dungeon 8239849722448024484 minecraft:bone=5 minecraft:copper_horse_armor=1 minecraft:golden_apple=1 minecraft:gunpowder=6 minecraft:string=2 minecraft:wheat=2
+container 197 -34 -266 minecraft:chests/simple_dungeon 2997223827256649488 minecraft:bucket=1 minecraft:gunpowder=19 minecraft:iron_horse_armor=1 minecraft:iron_ingot=3 minecraft:music_disc_13=1
+container 247 73 -365 minecraft:chests/simple_dungeon -3465221044075353561 minecraft:beetroot_seeds=4 minecraft:bone=2 minecraft:bucket=1 minecraft:golden_horse_armor=1 minecraft:iron_horse_armor=1 minecraft:iron_ingot=2 minecraft:music_disc_cat=1 minecraft:rotten_flesh=8
+container 253 73 -367 minecraft:chests/simple_dungeon 5270668029789987710 minecraft:bone=2 minecraft:enchanted_golden_apple=1 minecraft:gunpowder=2 minecraft:iron_horse_armor=1 minecraft:pumpkin_seeds=4 minecraft:rotten_flesh=1
+container 268 83 -353 minecraft:chests/village/village_savanna_house -428232086373509109 minecraft:bread=2 minecraft:bundle=1 minecraft:tall_grass=1 minecraft:wheat_seeds=5
+container 264 86 -324 minecraft:chests/village/village_butcher 2979713541205136893 minecraft:beef=6 minecraft:mutton=2 minecraft:porkchop=1
+container 275 70 -373 minecraft:chests/village/village_savanna_house 2020454581715248080 minecraft:acacia_sapling=4 minecraft:bread=4 minecraft:bundle=1 minecraft:gold_nugget=3 minecraft:tall_grass=2 minecraft:wheat_seeds=5
+container 303 66 -348 minecraft:chests/village/village_savanna_house 7791919327212669810 minecraft:acacia_sapling=3 minecraft:gold_nugget=2 minecraft:tall_grass=1 minecraft:wheat_seeds=3
+container 298 79 -305 minecraft:chests/village/village_cartographer 7983494057416371376 minecraft:bread=3 minecraft:map=1 minecraft:paper=6 minecraft:stick=2
+container 298 78 -291 minecraft:chests/village/village_cartographer 7542724979751349794 minecraft:bread=3 minecraft:map=4 minecraft:paper=4
+container 289 77 -281 minecraft:chests/village/village_savanna_house -6502055567516087092 minecraft:acacia_sapling=3 minecraft:bread=8 minecraft:wheat_seeds=10
+container 334 66 -355 minecraft:chests/village/village_cartographer 2290566644769170774 minecraft:bread=6
+container 335 66 -329 minecraft:chests/village/village_cartographer 8871230916609113842 minecraft:compass=1
+container 351 63 -358 minecraft:chests/village/village_mason -1158218563136169326 minecraft:bread=3 minecraft:emerald=1 minecraft:smooth_stone=1 minecraft:stone=1 minecraft:stone_bricks=1
+end 47

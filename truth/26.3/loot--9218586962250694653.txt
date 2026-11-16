@@ -1,0 +1,70 @@
+seed -9218586962250694653
+order minecraft:abandoned_camp_bamboo_jungle 4 0
+order minecraft:abandoned_camp_birch_forest 4 1
+order minecraft:abandoned_camp_cherry_grove 4 2
+order minecraft:abandoned_camp_dappled_forest 4 3
+order minecraft:abandoned_camp_flower_forest 4 4
+order minecraft:abandoned_camp_forest 4 5
+order minecraft:abandoned_camp_meadow 4 6
+order minecraft:abandoned_camp_old_growth_birch_forest 4 7
+order minecraft:abandoned_camp_old_growth_pine_taiga 4 8
+order minecraft:abandoned_camp_old_growth_spruce_taiga 4 9
+order minecraft:abandoned_camp_pale_garden 4 10
+order minecraft:abandoned_camp_savanna 4 11
+order minecraft:abandoned_camp_snowy_taiga 4 12
+order minecraft:abandoned_camp_sparse_jungle 4 13
+order minecraft:abandoned_camp_swamp 4 14
+order minecraft:abandoned_camp_taiga 4 15
+order minecraft:abandoned_camp_windswept_forest 4 16
+order minecraft:abandoned_camp_wooded_badlands 4 17
+order minecraft:ancient_city 7 0
+order minecraft:bastion_remnant 4 18
+order minecraft:buried_treasure 3 0
+order minecraft:desert_pyramid 4 19
+order minecraft:end_city 4 20
+order minecraft:fortress 7 1
+order minecraft:igloo 4 21
+order minecraft:jungle_pyramid 4 22
+order minecraft:mansion 4 23
+order minecraft:mineshaft 3 1
+order minecraft:mineshaft_mesa 3 2
+order minecraft:monument 4 24
+order minecraft:nether_fossil 7 2
+order minecraft:ocean_ruin_cold 4 25
+order minecraft:ocean_ruin_warm 4 26
+order minecraft:pillager_outpost 4 27
+order minecraft:ruined_portal 4 28
+order minecraft:ruined_portal_desert 4 29
+order minecraft:ruined_portal_jungle 4 30
+order minecraft:ruined_portal_mountain 4 31
+order minecraft:ruined_portal_nether 4 32
+order minecraft:ruined_portal_ocean 4 33
+order minecraft:ruined_portal_swamp 4 34
+order minecraft:shipwreck 4 35
+order minecraft:shipwreck_beached 4 36
+order minecraft:stronghold 4 37
+order minecraft:swamp_hut 4 38
+order minecraft:trail_ruins 3 3
+order minecraft:trial_chambers 3 4
+order minecraft:village_desert 4 39
+order minecraft:village_plains 4 40
+order minecraft:village_savanna 4 41
+order minecraft:village_snowy 4 42
+order minecraft:village_taiga 4 43
+structure minecraft:buried_treasure -9 -40
+container -135 57 -631 minecraft:chests/buried_treasure -5615134539777986574 minecraft:cooked_cod=4 minecraft:cooked_salmon=4 minecraft:emerald=6 minecraft:gold_ingot=7 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=19 minecraft:leather_chestplate=1 minecraft:potion=2 minecraft:prismarine_crystals=8
+structure minecraft:buried_treasure -8 -40
+container -119 54 -631 minecraft:chests/buried_treasure 2456152057890615833 minecraft:cooked_cod=2 minecraft:cooked_salmon=2 minecraft:emerald=8 minecraft:gold_ingot=5 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=10 minecraft:prismarine_crystals=4 minecraft:tnt=2
+structure minecraft:buried_treasure 4 29
+container 73 50 473 minecraft:chests/buried_treasure 5699595086569543017 minecraft:cooked_cod=3 minecraft:cooked_salmon=4 minecraft:diamond=1 minecraft:emerald=10 minecraft:gold_ingot=5 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=13
+structure minecraft:buried_treasure 10 -3
+container 169 64 -39 minecraft:chests/buried_treasure -2333572018914068202 minecraft:cooked_cod=3 minecraft:cooked_salmon=4 minecraft:emerald=6 minecraft:gold_ingot=8 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=8 minecraft:iron_spear=1 minecraft:prismarine_crystals=2 minecraft:tnt=4
+structure minecraft:buried_treasure 13 29
+container 217 59 473 minecraft:chests/buried_treasure -1880181757647327935 minecraft:cooked_cod=4 minecraft:cooked_salmon=4 minecraft:diamond=2 minecraft:gold_ingot=5 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=10 minecraft:potion=1 minecraft:tnt=2
+structure minecraft:village_plains 16 22
+container 210 64 382 minecraft:chests/village/village_plains_house -5490836615803747703 minecraft:apple=9 minecraft:bread=1 minecraft:oak_sapling=3 minecraft:potato=9
+container 231 65 351 minecraft:chests/village/village_plains_house -4501987314965963614 minecraft:bread=6 minecraft:emerald=1 minecraft:potato=9
+container 267 -15 305 minecraft:chests/simple_dungeon 6624052692904507493 minecraft:bread=1 minecraft:copper_horse_armor=1 minecraft:gunpowder=3 minecraft:music_disc_cat=1 minecraft:rotten_flesh=13 minecraft:wheat=8
+container 271 -15 307 minecraft:chests/simple_dungeon -6751650518521397823 minecraft:golden_apple=1 minecraft:gunpowder=5 minecraft:melon_seeds=2 minecraft:rotten_flesh=8 minecraft:string=1 minecraft:wheat=3
+container 267 64 395 minecraft:chests/village/village_plains_house 319550537631597951 minecraft:apple=4 minecraft:bread=7 minecraft:bundle=1 minecraft:oak_sapling=2 minecraft:potato=6
+end 10

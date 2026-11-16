@@ -1,0 +1,62 @@
+seed 1
+order minecraft:abandoned_camp_bamboo_jungle 4 0
+order minecraft:abandoned_camp_birch_forest 4 1
+order minecraft:abandoned_camp_cherry_grove 4 2
+order minecraft:abandoned_camp_dappled_forest 4 3
+order minecraft:abandoned_camp_flower_forest 4 4
+order minecraft:abandoned_camp_forest 4 5
+order minecraft:abandoned_camp_meadow 4 6
+order minecraft:abandoned_camp_old_growth_birch_forest 4 7
+order minecraft:abandoned_camp_old_growth_pine_taiga 4 8
+order minecraft:abandoned_camp_old_growth_spruce_taiga 4 9
+order minecraft:abandoned_camp_pale_garden 4 10
+order minecraft:abandoned_camp_savanna 4 11
+order minecraft:abandoned_camp_snowy_taiga 4 12
+order minecraft:abandoned_camp_sparse_jungle 4 13
+order minecraft:abandoned_camp_swamp 4 14
+order minecraft:abandoned_camp_taiga 4 15
+order minecraft:abandoned_camp_windswept_forest 4 16
+order minecraft:abandoned_camp_wooded_badlands 4 17
+order minecraft:ancient_city 7 0
+order minecraft:bastion_remnant 4 18
+order minecraft:buried_treasure 3 0
+order minecraft:desert_pyramid 4 19
+order minecraft:end_city 4 20
+order minecraft:fortress 7 1
+order minecraft:igloo 4 21
+order minecraft:jungle_pyramid 4 22
+order minecraft:mansion 4 23
+order minecraft:mineshaft 3 1
+order minecraft:mineshaft_mesa 3 2
+order minecraft:monument 4 24
+order minecraft:nether_fossil 7 2
+order minecraft:ocean_ruin_cold 4 25
+order minecraft:ocean_ruin_warm 4 26
+order minecraft:pillager_outpost 4 27
+order minecraft:ruined_portal 4 28
+order minecraft:ruined_portal_desert 4 29
+order minecraft:ruined_portal_jungle 4 30
+order minecraft:ruined_portal_mountain 4 31
+order minecraft:ruined_portal_nether 4 32
+order minecraft:ruined_portal_ocean 4 33
+order minecraft:ruined_portal_swamp 4 34
+order minecraft:shipwreck 4 35
+order minecraft:shipwreck_beached 4 36
+order minecraft:stronghold 4 37
+order minecraft:swamp_hut 4 38
+order minecraft:trail_ruins 3 3
+order minecraft:trial_chambers 3 4
+order minecraft:village_desert 4 39
+order minecraft:village_plains 4 40
+order minecraft:village_savanna 4 41
+order minecraft:village_snowy 4 42
+order minecraft:village_taiga 4 43
+structure minecraft:buried_treasure -28 -22
+container -439 58 -343 minecraft:chests/buried_treasure 1457846149188384685 minecraft:cooked_cod=4 minecraft:emerald=4 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=10 minecraft:potion=1 minecraft:prismarine_crystals=3 minecraft:tnt=3
+structure minecraft:buried_treasure 36 11
+container 585 49 185 minecraft:chests/buried_treasure -6829009026098208152 minecraft:cooked_salmon=4 minecraft:emerald=8 minecraft:gold_ingot=1 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=16 minecraft:potion=1
+structure minecraft:buried_treasure 37 10
+container 601 42 169 minecraft:chests/buried_treasure 7100087421283541610 minecraft:cooked_cod=3 minecraft:cooked_salmon=4 minecraft:diamond=2 minecraft:gold_ingot=3 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=11 minecraft:potion=1 minecraft:prismarine_crystals=1
+structure minecraft:buried_treasure 37 13
+container 601 60 217 minecraft:chests/buried_treasure 6157828602202354031 minecraft:cooked_cod=4 minecraft:cooked_salmon=3 minecraft:gold_ingot=4 minecraft:heart_of_the_sea=1 minecraft:iron_ingot=10 minecraft:potion=1 minecraft:prismarine_crystals=1 minecraft:tnt=4
+end 4
