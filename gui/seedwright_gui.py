@@ -43,8 +43,7 @@ class SliderEntry(QWidget):
         self.spin = QSpinBox()
         self.spin.setRange(lo, hi)
         self.spin.setSuffix(suffix)
-        self.spin.setMinimumWidth(92)
-        self.spin.setKeyboardTracking(False)
+        self.spin.setMinimumWidth(92)  # keyboard tracking stays on: the slider follows every keystroke
         lay.addWidget(self.slider, 1)
         lay.addWidget(self.spin)
         self.slider.valueChanged.connect(lambda v: self.spin.setValue(v * self.step))
@@ -82,7 +81,8 @@ class Log2Entry(QWidget):
         lay.addWidget(self.slider, 1)
         lay.addWidget(self.edit)
         self.slider.valueChanged.connect(lambda e: (self.edit.setText(f"2^{e}"), self.valueChanged.emit()))
-        self.edit.editingFinished.connect(self._edited)
+        self.edit.textEdited.connect(lambda _: self._edited(live=True))  # follow typing
+        self.edit.editingFinished.connect(self._edited)                  # on Enter/blur, reset invalid text
         self.edit.setText(f"2^{exp}")
         self.slider.setValue(exp)
 
@@ -94,10 +94,11 @@ class Log2Entry(QWidget):
             return 1 << int(m.group(1))
         return int(t) if t.isdigit() and int(t) > 0 else None
 
-    def _edited(self):
+    def _edited(self, live=False):
         v = self.parse(self.edit.text())
         if v is None:
-            self.edit.setText(f"2^{self.slider.value()}")
+            if not live:  # half-typed text is fine while typing
+                self.edit.setText(f"2^{self.slider.value()}")
             return
         v = min(v, 1 << 48)
         self.slider.blockSignals(True)
