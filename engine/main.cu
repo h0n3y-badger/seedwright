@@ -354,6 +354,15 @@ static std::string hitName(const Pack& P, int what) {
 }
 
 // "<seed>  spawn X Z  | name x z | >name x z ..." ('>' per nesting level: found inside the item before)
+// "123", "0x7b" or "2^N" (the GUI writes powers of two that way)
+static uint64_t parseU64(const std::string& v) {
+	size_t c = v.find('^');
+	if (c == std::string::npos) return std::stoull(v, nullptr, 0);
+	uint64_t b = std::stoull(v.substr(0, c)), e = std::stoull(v.substr(c + 1)), r = 1;
+	while (e--) r *= b;
+	return r;
+}
+
 static void printHit(const Pack& P, const Hit& h) {
 	printf("%lld  spawn %d %d ", (long long)h.seed, h.spawnX, h.spawnZ);
 	for (int i = 0; i < h.n; i++) printf(" | %s%s %d %d", std::string(h.depth[i], '>').c_str(), hitName(P, h.what[i]).c_str(), h.x[i], h.z[i]);
@@ -390,8 +399,8 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 		}
 		return 0;
 	}
-	uint64_t start = opt.count("start") ? std::stoull(opt["start"]) : 0;
-	uint64_t count = opt.count("count") ? std::stoull(opt["count"]) : (1ULL << 24);
+	uint64_t start = opt.count("start") ? parseU64(opt["start"]) : 0;
+	uint64_t count = opt.count("count") ? parseU64(opt["count"]) : (1ULL << 24);
 	// stage A streams in chunks so a huge --count never holds all survivors at once
 	std::mutex mu;
 	const uint64_t chunkA = 1ULL << 24;
@@ -537,8 +546,8 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		runB(v);
 		return 0;
 	}
-	uint64_t start = opt.count("start") ? std::stoull(opt["start"]) : 0;
-	uint64_t count = opt.count("count") ? std::stoull(opt["count"]) : (1ULL << 32);
+	uint64_t start = opt.count("start") ? parseU64(opt["start"]) : 0;
+	uint64_t count = opt.count("count") ? parseU64(opt["count"]) : (1ULL << 32);
 	// Stage A in batches; a batch with more survivors than the buffer holds is shrunk and redone, so no
 	// survivor is ever dropped and seeds are covered in order.
 	uint64_t chunkA = 1ULL << 24;  // grows x4 while batches stay well under the buffer
