@@ -342,6 +342,7 @@ static Query parseQuery(const Pack& P, const StructTables& T, std::vector<std::s
 	}
 	q.exact = opt.count("seeds") ? 1 : 0;
 	prepareBiomeLeaves(q, *P.dev);
+	prepareKReject(q, *P.dev);
 	q.buildingSlack = opt.count("building-slack") ? std::stoi(opt["building-slack"]) : 1;
 	q.buildingPass = opt.count("all-buildings") ? 1 : 0;
 	if (q.n[q.root].first < 0) throw std::runtime_error("no conditions (use --where '...' or --need/--biome/...)");

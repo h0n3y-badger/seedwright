@@ -3,6 +3,7 @@
 #pragma once
 #include "structures.h"
 #include "jigsaw.h"
+#include <vector>
 
 namespace sw {
 
@@ -17,7 +18,7 @@ enum NodeKind {
 	N_BUILDING,    // >= count buildings of a category in the enclosing village (exact with terrain.h heights, see stageB)
 };
 
-enum { MAX_NODES = 48, MAX_HITS = 32, MAX_DEPTH = 6, Y_ANY = -100000, MAX_STRONGHOLDS = 32, MAX_PIECES = 320, MAX_BIOME_LEAVES = 4096 };
+enum { MAX_NODES = 48, MAX_HITS = 32, MAX_DEPTH = 6, Y_ANY = -100000, MAX_STRONGHOLDS = 32, MAX_PIECES = 320, MAX_BIOME_LEAVES = 4096, MAX_KCOND = 8, MAX_KB = 512 };
 
 struct Node {
 	int kind, count, radius, y;
@@ -27,6 +28,11 @@ struct Node {
 	int biome;            // N_BIOME
 	int leaf0, nleaf;     // N_BIOME: RTree leaves of that biome in Query::leaves (nleaf 0 = no list, always full search)
 	int64_t bbLo[7], bbHi[7];  // N_BIOME: union box of those leaves
+	// N_BIOME early reject from the cheap climate dims (see prepareKReject):
+	// "no" when for every c < nkc: min over K boxes in kcO[c] of the K distance < min over K boxes in kcW[c]
+	// stage s: K boxes Query::kb[kb0[s], +nkb[s]) (masks index them)
+	int nkc[2], kb0[2], nkb[2];
+	uint64_t kcW[2][MAX_KCOND], kcO[2][MAX_KCOND];
 	uint64_t cat[3];      // N_BUILDING: jigsaw building categories that count (aliases: weaponsmith|weapon_smith)
 };
 
@@ -40,7 +46,105 @@ struct Query {
 	Node n[MAX_NODES];
 	int nleaves;
 	uint16_t leaves[MAX_BIOME_LEAVES];
+	// early-reject K boxes over climate dims {0, 1, 2, 6} (see prepareKReject); opsK[s]: ops computing stage s's dims
+	int nkb;
+	int64_t kbLo[MAX_KB][4], kbHi[MAX_KB][4];
+	uint64_t opsK[2];
 };
+
+// Host: the early reject from cheap climate dims. Stage 0 knows K = {temperature, humidity} (4+4 noise octaves
+// after the shifts), stage 1 adds continentalness (18 more); erosion and weirdness (14) and depth come after.
+// For a wanted leaf w and a non-wanted leaf o whose box contains w's box in every dim outside K, o is at least as
+// close as w in those dims for any climate, so dK(o) < dK(w) proves d(o) < d(w) whatever the remaining noises
+// give. When every wanted leaf is beaten that way, the winner (a leaf of minimal distance) can't be the wanted
+// biome. Per wanted leaf: (its K box, the K boxes of such o); equal o sets merge, implied conditions drop.
+// K boxes live in Query::kbLo/kbHi over dims KDIMS (unknown dims of a stage get an unbounded range).
+inline void prepareKReject(Query& q, const PackDev& pk) {
+	const int KDIMS[4] = {0, 1, 2, 6};
+	const int64_t INF = 1LL << 60;
+	q.nkb = 0;
+	for (int ni = 0; ni < q.nnodes; ni++) q.n[ni].nkc[0] = q.n[ni].nkc[1] = 0;
+	int upto = climateUpto(pk);
+	uint64_t dep[MAX_OPS];  // ops each op reads, transitively (incl. itself)
+	for (int i = 0; i <= upto; i++) {
+		const Op& o = pk.ops[i];
+		uint64_t m = 1ULL << i;
+		if (o.a >= 0) m |= dep[o.a];
+		if (o.b >= 0) m |= dep[o.b];
+		if (o.c >= 0) m |= dep[o.c];
+		if (o.code == OP_SPLINE)
+			for (int sp = 0; sp < pk.nsplines; sp++)  // any spline coordinate (over-approximation: still closed)
+				if (pk.splines[sp].coord >= 0 && pk.splines[sp].coord < i) m |= dep[pk.splines[sp].coord];
+		dep[i] = m;
+	}
+	q.opsK[0] = dep[pk.climate[0]] | dep[pk.climate[1]];
+	q.opsK[1] = q.opsK[0] | dep[pk.climate[2]];
+	for (int s = 0; s < 2; s++) {
+		bool yind = true;  // a stage's dims must be y-independent (a column is rejected at once)
+		for (int i = 0; i <= upto; i++) yind = yind && !(((q.opsK[s] >> i) & 1) && pk.ops[i].ydep);
+		for (int ni = 0; ni < q.nnodes && yind; ni++) {
+			Node& nd = q.n[ni];
+			if (nd.kind != N_BIOME) continue;
+			bool known[7] = {s >= 0, s >= 0, s >= 1, false, false, false, true};
+			int kb0 = q.nkb, nkb = 0;
+			auto boxOf = [&](const RNode& r) {  // local K-box index (dedup), -1 = pool full
+				for (int k = 0; k < nkb; k++) {
+					bool same = true;
+					for (int j = 0; j < 4; j++)
+						same = same && (!known[KDIMS[j]] || (q.kbLo[kb0 + k][j] == r.lo[KDIMS[j]] && q.kbHi[kb0 + k][j] == r.hi[KDIMS[j]]));
+					if (same) return k;
+				}
+				if (nkb == 64 || kb0 + nkb == MAX_KB) return -1;
+				for (int j = 0; j < 4; j++) {
+					bool kn = known[KDIMS[j]];
+					q.kbLo[kb0 + nkb][j] = kn ? r.lo[KDIMS[j]] : -INF;
+					q.kbHi[kb0 + nkb][j] = kn ? r.hi[KDIMS[j]] : INF;
+				}
+				return nkb++;
+			};
+			std::vector<std::pair<uint64_t, uint64_t>> c;  // (W, O) local K-box masks
+			bool fail = false;
+			for (int w = 0; w < pk.nrnodes && !fail; w++) {
+				const RNode& W = pk.rnodes[w];
+				if (W.nchild != 0 || W.biome != nd.biome) continue;
+				uint64_t om = 0;
+				for (int o = 0; o < pk.nrnodes && !fail; o++) {
+					const RNode& O = pk.rnodes[o];
+					if (O.nchild != 0 || O.biome == nd.biome) continue;
+					bool in = true;
+					for (int d = 0; d < 7 && in; d++) in = known[d] || (O.lo[d] <= W.lo[d] && O.hi[d] >= W.hi[d]);
+					if (!in) continue;
+					int k = boxOf(O);
+					if (k < 0) fail = true;
+					else om |= 1ULL << k;
+				}
+				int kw = fail ? -1 : boxOf(W);
+				if (om == 0 || kw < 0) fail = true;  // never provably beaten (or too many boxes)
+				if (fail) break;
+				bool merged = false;
+				for (auto& e : c)
+					if (e.second == om) e.first |= 1ULL << kw, merged = true;
+				if (!merged) c.push_back({1ULL << kw, om});
+			}
+			if (fail || c.empty()) continue;
+			std::vector<std::pair<uint64_t, uint64_t>> keep;  // drop (W, O) implied by some (W' >= W, O' <= O)
+			for (size_t i = 0; i < c.size(); i++) {
+				bool red = false;
+				for (size_t j = 0; j < c.size() && !red; j++)
+					red = c[j] != c[i] && (c[i].first & ~c[j].first) == 0 && (c[j].second & ~c[i].second) == 0;
+				bool dup = false;
+				for (auto& e : keep) dup = dup || e == c[i];
+				if (!red && !dup) keep.push_back(c[i]);
+			}
+			if (keep.size() > MAX_KCOND) continue;
+			q.nkb += nkb;
+			nd.kb0[s] = kb0;
+			nd.nkb[s] = nkb;
+			nd.nkc[s] = (int)keep.size();
+			for (int k = 0; k < nd.nkc[s]; k++) nd.kcW[s][k] = keep[k].first, nd.kcO[s][k] = keep[k].second;
+		}
+	}
+}
 
 // Host: per N_BIOME node, the RTree leaves that carry its biome (for the exact reject in evalBiome).
 inline void prepareBiomeLeaves(Query& q, const PackDev& pk) {
@@ -180,21 +284,59 @@ HDN bool evalStructure(EvalCtx& c, const Node& nd, int ni, int ax, int az, int s
 // wanted biome, the result can't be of that biome, whatever the search's tie-breaking. Otherwise (or
 // without a leaf list) the full vanilla search decides. wit: in/out previous full-search result.
 HDN bool biomeIs(const PackDev& pk, const Query& q, const Node& nd, const int64_t* t, int& wit) {
-	if (nd.nleaf > 0 && wit >= 0 && pk.rnodes[wit].biome != nd.biome) {
-		int64_t dW = nodeDist(pk.rnodes[wit], t), lb = 0;
+	if (wit < 0 || pk.rnodes[0].nchild == 0) {
+		wit = rtreeSearch(pk, 0, t, -1);
+		return pk.rnodes[wit].biome == nd.biome;
+	}
+	// any leaf's distance bounds the winner's: dW (previous result W) seeds the search below
+	int64_t dW = nodeDist(pk.rnodes[wit], t), stop = 0;
+	if (nd.nleaf > 0) {
+		int64_t lb = 0;  // lower bound of every wanted leaf's distance
 		for (int k = 0; k < 7; k++) {
 			int64_t d = pdist(nd.bbLo[k], nd.bbHi[k], t[k]);
 			lb += d * d;
 		}
-		if (lb > dW) return false;
-		if (nd.nleaf <= 128) {  // per-leaf check; for big biomes (plains, desert) the full search is cheaper
-			bool reach = false;
-			for (int i = 0; i < nd.nleaf && !reach; i++) reach = nodeDist(pk.rnodes[q.leaves[nd.leaf0 + i]], t) <= dW;
-			if (!reach) return false;
+		if (lb > dW) return false;  // W (not wanted, as lb > dW) is strictly closer than every wanted leaf
+		if (nd.nleaf <= 128) {  // exact nearest wanted leaf; for big biomes (plains, desert) the search is cheaper
+			int64_t mW = INT64_MAX;
+			for (int i = 0; i < nd.nleaf; i++) {
+				int64_t d = nodeDist(pk.rnodes[q.leaves[nd.leaf0 + i]], t);
+				mW = d < mW ? d : mW;
+			}
+			if (mW > dW) return false;
+			lb = mW;
+			dW = mW;  // the winner's distance is <= mW too
 		}
+		stop = lb;  // a leaf closer than every wanted leaf decides "no" (wit then is that leaf, still a valid bound)
 	}
-	wit = rtreeSearch(pk, 0, t, -1);
-	return pk.rnodes[wit].biome == nd.biome;
+	int best = -1;
+	int64_t minD = dW + 1;
+	rtreeSearchB(pk, 0, t, best, minD, stop);
+	wit = best;
+	return minD >= stop && pk.rnodes[best].biome == nd.biome;
+}
+
+// early reject (prepareKReject), stage s: true = the biome at a climate with these dims 0..2 (t[6] = 0) isn't nd's
+HDN bool kReject(const Query& q, const Node& nd, int s, const int64_t* t) {
+	int64_t dk[64];
+	for (int k = 0; k < nd.nkb[s]; k++) {
+		const int64_t *lo = q.kbLo[nd.kb0[s] + k], *hi = q.kbHi[nd.kb0[s] + k];
+		int64_t d = 0;
+		for (int j = 0; j < 4; j++) {
+			int64_t e = pdist(lo[j], hi[j], j < 3 ? t[j] : 0);
+			d += e * e;
+		}
+		dk[k] = d;
+	}
+	for (int c = 0; c < nd.nkc[s]; c++) {
+		int64_t mW = INT64_MAX, mO = INT64_MAX;
+		for (int k = 0; k < nd.nkb[s]; k++) {
+			if ((nd.kcW[s][c] >> k) & 1) mW = dk[k] < mW ? dk[k] : mW;
+			if ((nd.kcO[s][c] >> k) & 1) mO = dk[k] < mO ? dk[k] : mO;
+		}
+		if (!(mO < mW)) return false;
+	}
+	return true;
 }
 
 HDN bool evalBiome(EvalCtx& c, const Node& nd, int ax, int az, int depth) {
@@ -205,6 +347,7 @@ HDN bool evalBiome(EvalCtx& c, const Node& nd, int ax, int az, int depth) {
 	int y0 = nd.y == Y_ANY ? -48 : nd.y, y1 = nd.y == Y_ANY ? 48 : nd.y;
 	const PackDev& pk = *c.pk;
 	int upto = climateUpto(pk), wit = -1;
+	bool early = nd.nkc[0] > 0 || nd.nkc[1] > 0;
 	double pv[MAX_OPS], vv[MAX_OPS];
 	for (int r = 0; r <= steps; r++)
 		for (int dz = -r; dz <= r; dz++)
@@ -212,7 +355,22 @@ HDN bool evalBiome(EvalCtx& c, const Node& nd, int ax, int az, int depth) {
 				int bx = ax + dx * 16, bz = az + dz * 16;
 				if (dist2(bx, bz, ax, az) > R2) continue;
 				for (int y = y0; y <= y1; y += 16) {
-					evalOpsState(*c.w, pk, (bx >> 2) << 2, (y >> 2) << 2, (bz >> 2) << 2, false, false, upto, pv, vv, y != y0);
+					int qx = (bx >> 2) << 2, qy = (y >> 2) << 2, qz = (bz >> 2) << 2;
+					if (y == y0 && early) {  // cheap dims first: an early reject holds for the whole column
+						uint64_t done = 0;
+						bool rej = false;
+						for (int s = 0; s < 2 && !rej; s++) {
+							if (!nd.nkc[s]) continue;
+							evalOpsState(*c.w, pk, qx, qy, qz, false, false, upto, pv, vv, false, c.q->opsK[s] & ~done);
+							done |= c.q->opsK[s];
+							int64_t tk[3];
+							for (int i = 0; i <= s + 1; i++) tk[i] = quantize((float)pv[pk.climate[i]]);
+							rej = kReject(*c.q, nd, s, tk);
+						}
+						if (rej) break;
+						evalOpsState(*c.w, pk, qx, qy, qz, false, false, upto, pv, vv, false, ~done);
+					} else
+						evalOpsState(*c.w, pk, qx, qy, qz, false, false, upto, pv, vv, y != y0);
 					int64_t t[7];
 					for (int i = 0; i < 6; i++) t[i] = quantize((float)pv[pk.climate[i]]);
 					t[6] = 0;

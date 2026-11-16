@@ -513,6 +513,25 @@ HDN int rtreeSearch(const PackDev& pk, int node, const int64_t* t, int cand) {
 	return best;
 }
 
+// rtreeSearch(pk, 0, t, -1) with a head start: minD = bound + 1 for some bound >= the global minimum distance
+// (e.g. the distance of any leaf) and best = -1. The search still returns the first leaf in tree order of
+// globally minimal distance, exactly like the unseeded search (every subtree holding that leaf has a node
+// distance <= the minimum < minD until it is found); it just prunes more. Stops early once minD < stopBelow
+// (best is then a leaf closer than stopBelow, not necessarily the winner).
+HDN void rtreeSearchB(const PackDev& pk, int node, const int64_t* t, int& best, int64_t& minD, int64_t stopBelow) {
+	const RNode& n = pk.rnodes[node];
+	for (int c = 0; c < n.nchild && minD >= stopBelow; c++) {
+		int ch = n.child0 + c;
+		int64_t cd = nodeDist(pk.rnodes[ch], t);
+		if (minD > cd) {
+			if (pk.rnodes[ch].nchild == 0) {
+				minD = cd;
+				best = ch;
+			} else rtreeSearchB(pk, ch, t, best, minD, stopBelow);
+		}
+	}
+}
+
 // cand = leaf node index to start from (vanilla's RTree.lastResult), -1 = none. Returns the leaf.
 HD int leafFromClimate(const PackDev& pk, const float* c6, int cand) {
 	int64_t t[7];
