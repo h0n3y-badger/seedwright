@@ -156,40 +156,18 @@ HDN int structureAt(const World& w, const PackDev& pk, const StructTables& T, in
 }
 
 // ---- strongholds (ConcentricRingsStructurePlacement via ChunkGeneratorStructureState) ----
-// Computes the first `want` ring positions (each is independent of the later ones).
-HDN int strongholds(const World& w, const PackDev& pk, const SetDev& s, int want, int* outX, int* outZ) {
+// The ring RNG never depends on biomes: each stronghold's raw ring chunk and its biome-search fork seed
+// come from one cheap pass; the expensive biome search (moves it by <= 112 blocks) runs per stronghold.
+HDN int strongholdRings(uint64_t seed, const SetDev& s, int want, int* rawX, int* rawZ, uint64_t* fork) {
 	JavaRandom rnd;
-	rnd.setSeed((uint64_t)w.seed);
+	rnd.setSeed(seed);
 	double angle = rnd.nextDouble() * 3.141592653589793 * 2.0;
 	int pos = 0, circle = 0, spread = s.ringSpread, n = 0;
 	for (int i = 0; i < s.count && n < want; i++) {
 		double dist = (double)(4 * s.distance + s.distance * circle * 6) + (rnd.nextDouble() - 0.5) * (double)(s.distance * 2.5);
-		int ix = (int)(int64_t)floor(cos(angle) * dist + 0.5), iz = (int)(int64_t)floor(sin(angle) * dist + 0.5);  // Math.round
-		JavaRandom search;
-		search.setSeed((uint64_t)rnd.nextLong());  // random.fork()
-		// findBiomeHorizontal(sectionToBlock(ix,8), 0, sectionToBlock(iz,8), 112, preferred, search)
-		int cxq = ((ix << 4) + 8) >> 2, czq = ((iz << 4) + 8) >> 2, R = 112 >> 2;
-		int found = 0, rx = 0, rz = 0, leaf = -1;
-		float pv[MAX_OPS];
-		int upto = climateUpto(pk);
-		for (int dz = -R; dz <= R; dz++)
-			for (int dx = -R; dx <= R; dx++) {
-				// vanilla's RTree carries lastResult from query to query: chain it through the scan
-				evalOps(w, pk, (cxq + dx) << 2, 0, (czq + dz) << 2, false, false, upto, pv);
-				float c6[6];
-				for (int k = 0; k < 6; k++) c6[k] = pv[pk.climate[k]];
-				leaf = leafFromClimate(pk, c6, leaf);
-				int b = pk.rnodes[leaf].biome;
-				if (maskHas(s.preferred, b)) {
-					if (found == 0 || search.nextInt(found + 1) == 0) {
-						rx = (cxq + dx) << 2;
-						rz = (czq + dz) << 2;
-					}
-					found++;
-				}
-			}
-		outX[n] = found ? rx >> 4 : ix;
-		outZ[n] = found ? rz >> 4 : iz;
+		rawX[n] = (int)(int64_t)floor(cos(angle) * dist + 0.5);  // Math.round
+		rawZ[n] = (int)(int64_t)floor(sin(angle) * dist + 0.5);
+		fork[n] = (uint64_t)rnd.nextLong();  // random.fork()
 		n++;
 		angle += 6.283185307179586 / spread;
 		if (++pos == spread) {
@@ -200,6 +178,44 @@ HDN int strongholds(const World& w, const PackDev& pk, const SetDev& s, int want
 			angle += rnd.nextDouble() * 3.141592653589793 * 2.0;
 		}
 	}
+	return n;
+}
+
+// findBiomeHorizontal(sectionToBlock(ix,8), 0, sectionToBlock(iz,8), 112, preferred, fork) -> final chunk
+HDN void strongholdResolve(const World& w, const PackDev& pk, const SetDev& s, int ix, int iz, uint64_t forkSeed, int& outX, int& outZ) {
+	JavaRandom search;
+	search.setSeed(forkSeed);
+	int cxq = ((ix << 4) + 8) >> 2, czq = ((iz << 4) + 8) >> 2, R = 112 >> 2;
+	int found = 0, rx = 0, rz = 0, leaf = -1;
+	float pv[MAX_OPS];
+	int upto = climateUpto(pk);
+	for (int dz = -R; dz <= R; dz++)
+		for (int dx = -R; dx <= R; dx++) {
+			// vanilla's RTree carries lastResult from query to query: chain it through the scan
+			evalOps(w, pk, (cxq + dx) << 2, 0, (czq + dz) << 2, false, false, upto, pv);
+			float c6[6];
+			for (int k = 0; k < 6; k++) c6[k] = pv[pk.climate[k]];
+			leaf = leafFromClimate(pk, c6, leaf);
+			int b = pk.rnodes[leaf].biome;
+			if (maskHas(s.preferred, b)) {
+				if (found == 0 || search.nextInt(found + 1) == 0) {
+					rx = (cxq + dx) << 2;
+					rz = (czq + dz) << 2;
+				}
+				found++;
+			}
+		}
+	outX = found ? rx >> 4 : ix;
+	outZ = found ? rz >> 4 : iz;
+}
+
+// Computes the first `want` ring positions (each is independent of the later ones).
+HDN int strongholds(const World& w, const PackDev& pk, const SetDev& s, int want, int* outX, int* outZ) {
+	enum { CAP = 128 };
+	int rx[CAP], rz[CAP];
+	uint64_t fk[CAP];
+	int n = strongholdRings((uint64_t)w.seed, s, want < CAP ? want : CAP, rx, rz, fk);
+	for (int i = 0; i < n; i++) strongholdResolve(w, pk, s, rx[i], rz[i], fk[i], outX[i], outZ[i]);
 	return n;
 }
 

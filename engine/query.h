@@ -1,166 +1,285 @@
-// Seed filters ("x villages within r blocks of spawn", biomes, strongholds...). Device-capable.
+// Seed filters as a small condition tree ("2 plains villages within 500 { 1 weaponsmith }, biome
+// cherry_grove within 1500, not monument within 800"). Device-capable; nodes live in a flat array.
 #pragma once
 #include "structures.h"
 
 namespace sw {
 
-enum CondKind { COND_STRUCTURE, COND_BIOME, COND_STRONGHOLD, COND_SPAWN };
-
-struct Cond {
-	int kind, count, radius;
-	uint64_t structMask;  // structure indices (bit i = structure i)
-	uint32_t setMask;     // sets that can produce one of those structures
-	int biome;
+enum NodeKind {
+	N_ALL,         // every child holds
+	N_ANY,         // at least one child holds
+	N_NOT,         // no child holds (children are an implicit ALL)
+	N_STRUCTURE,   // >= count structures within radius of the anchor, each satisfying the children
+	N_BIOME,       // biome within radius of the anchor at height y (or any of the cave levels)
+	N_STRONGHOLD,  // >= count strongholds within radius, each satisfying the children
+	N_SPAWN,       // world spawn within radius of 0,0 (independent of the anchor)
+	N_BUILDING,    // >= count buildings of a category in the enclosing village (approximate)
 };
 
-enum { MAX_CONDS = 12, MAX_HITS = 16 };
+enum { MAX_NODES = 48, MAX_HITS = 32, MAX_DEPTH = 6, Y_ANY = -100000, MAX_STRONGHOLDS = 32 };
+
+struct Node {
+	int kind, count, radius, y;
+	int first, next;      // first child, next sibling (-1 = none)
+	uint64_t structMask;  // N_STRUCTURE: structure indices (bit i = structure i)
+	uint32_t setMask;     // sets that can produce one of those structures
+	int biome;            // N_BIOME
+	int category;         // N_BUILDING
+};
 
 struct Query {
-	int ncond, anchorSpawn, slack;
-	Cond c[MAX_CONDS];
+	int nnodes, root, anchorSpawn, slack, needSpawn;
+	int exact;  // skip the slack-based prefilter (checking given seeds: the prefilter assumes spawn within slack of 0,0)
+	Node n[MAX_NODES];
 };
 
 struct Hit {
 	int64_t seed;
 	int spawnX, spawnZ;
 	int n;
-	int x[MAX_HITS], z[MAX_HITS], what[MAX_HITS];
+	int x[MAX_HITS], z[MAX_HITS], what[MAX_HITS], depth[MAX_HITS];
 };
+enum { WHAT_STRONGHOLD = -1000, WHAT_SPAWN = -1001, WHAT_BUILDING0 = -2000 };  // biomes: -1 - biome
 
 HD int64_t dist2(int ax, int az, int bx, int bz) {
 	int64_t dx = ax - bx, dz = az - bz;
 	return dx * dx + dz * dz;
 }
 
-// Stage A: placement-only, depends on the low 48 bits only. Counts candidate chunks of the condition's
-// sets around the world origin, within radius+slack (the spawn is near but not at the origin).
-HDN bool stageA(const StructTables& T, const Query& q, uint64_t seed) {
-	for (int ci = 0; ci < q.ncond; ci++) {
-		const Cond& c = q.c[ci];
-		if (c.kind != COND_STRUCTURE) continue;
-		int R = c.radius + (q.anchorSpawn ? q.slack : 0);
-		int64_t R2 = (int64_t)R * R;
-		int n = 0;
-		for (int si = 0; si < T.nsets && n < c.count; si++) {
-			if (!((c.setMask >> si) & 1) || T.sets[si].type != SET_SPREAD) continue;
-			const SetDev& s = T.sets[si];
-			int c0 = (-R - 8) >> 4, c1 = (R + 8) >> 4;
-			int r0 = floorDiv(c0, s.spread.spacing), r1 = floorDiv(c1, s.spread.spacing);
-			for (int rx = r0; rx <= r1 && n < c.count; rx++)
-				for (int rz = r0; rz <= r1 && n < c.count; rz++) {
-					int px, pz;
-					spreadCandidate(s.spread, seed, rx, rz, px, pz);
-					if (dist2(px * 16 + 8, pz * 16 + 8, 0, 0) > R2) continue;
-					if (!frequencyOk(s.spread, seed, px, pz)) continue;
-					if (s.exclusion >= 0 && !isStructureChunk(T, si, seed, px, pz)) continue;
-					n++;
-				}
-		}
-		if (n < c.count) return false;
-	}
+// Evaluation modes. All three agree on the tree; A and PRE are sound over-approximations of B.
+//  EVAL_A   : low 48 bits only, structure placement candidates (no biomes); non-structure leaves pass.
+//  EVAL_PRE : full seed, structure placement + biome validity, top level only, before the spawn is known.
+//  EVAL_B   : exact.
+enum { EVAL_A, EVAL_PRE, EVAL_B };
+
+struct EvalCtx {
+	const World* w;
+	const PackDev* pk;
+	const StructTables* T;
+	const Query* q;
+	uint64_t seed;
+	int mode;
+	Hit* hit;
+	// strongholds: raw ring positions (cheap, all at once) and biome-resolved positions (lazy, per index)
+	int shRaw, shRawX[MAX_STRONGHOLDS], shRawZ[MAX_STRONGHOLDS];
+	uint64_t shFork[MAX_STRONGHOLDS];
+	uint32_t shDone;
+	int shX[MAX_STRONGHOLDS], shZ[MAX_STRONGHOLDS];
+	int spawnX, spawnZ;
+	int curStructure, curCx, curCz;  // innermost enclosing structure (for buildings)
+};
+
+// N_BUILDING: buildings of one category in the enclosing village. Provided by jigsaw.h once village
+// layouts exist; until then the parser refuses building conditions.
+#ifndef SW_HAVE_JIGSAW
+HDN bool evalBuilding(EvalCtx&, const Node&, int, int, int) { return false; }
+#endif
+
+HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth);
+
+HDN bool evalChildren(EvalCtx& c, int ni, int ax, int az, int slack, int depth) {
+	for (int k = c.q->n[ni].first; k >= 0; k = c.q->n[k].next)
+		if (!evalNode(c, k, ax, az, slack, depth)) return false;
 	return true;
+}
+
+HD void addHit(EvalCtx& c, int what, int x, int z, int depth) {
+	Hit* h = c.hit;
+	if (!h || h->n >= MAX_HITS) return;
+	h->x[h->n] = x;
+	h->z[h->n] = z;
+	h->what[h->n] = what;
+	h->depth[h->n++] = depth;
+}
+
+HDN bool evalStructure(EvalCtx& c, const Node& nd, int ni, int ax, int az, int slack, int depth) {
+	int R = nd.radius + slack;
+	int64_t R2 = (int64_t)R * R;
+	int n = 0;
+	for (int si = 0; si < c.T->nsets && n < nd.count; si++) {
+		if (!((nd.setMask >> si) & 1) || c.T->sets[si].type != SET_SPREAD) continue;
+		const SetDev& s = c.T->sets[si];
+		int r0x = floorDiv((ax - R - 8) >> 4, s.spread.spacing), r1x = floorDiv((ax + R + 8) >> 4, s.spread.spacing);
+		int r0z = floorDiv((az - R - 8) >> 4, s.spread.spacing), r1z = floorDiv((az + R + 8) >> 4, s.spread.spacing);
+		for (int rx = r0x; rx <= r1x && n < nd.count; rx++)
+			for (int rz = r0z; rz <= r1z && n < nd.count; rz++) {
+				int px, pz;
+				spreadCandidate(s.spread, c.seed, rx, rz, px, pz);
+				int bx = px * 16 + 8, bz = pz * 16 + 8;
+				if (dist2(bx, bz, ax, az) > R2) continue;
+				if (c.mode == EVAL_A) {
+					if (!frequencyOk(s.spread, c.seed, px, pz)) continue;
+					if (s.exclusion >= 0 && !isStructureChunk(*c.T, si, c.seed, px, pz)) continue;
+					if (evalChildren(c, ni, bx, bz, 0, depth + 1)) n++;
+					continue;
+				}
+				if (!isStructureChunk(*c.T, si, c.seed, px, pz)) continue;
+				int st = structureAt(*c.w, *c.pk, *c.T, si, px, pz);
+				if (st < 0 || !((nd.structMask >> st) & 1)) continue;
+				if (c.mode == EVAL_PRE) {
+					n++;
+					continue;
+				}
+				int mark = c.hit ? c.hit->n : 0;
+				addHit(c, st, bx, bz, depth);
+				// children see the structure as their anchor (and the village id for buildings)
+				int saveSt = c.curStructure, saveCx = c.curCx, saveCz = c.curCz;
+				c.curStructure = st, c.curCx = px, c.curCz = pz;
+				bool ok = evalChildren(c, ni, bx, bz, 0, depth + 1);
+				c.curStructure = saveSt, c.curCx = saveCx, c.curCz = saveCz;
+				if (ok) n++;
+				else if (c.hit) c.hit->n = mark;
+			}
+	}
+	return n >= nd.count;
+}
+
+HDN bool evalBiome(EvalCtx& c, const Node& nd, int ax, int az, int depth) {
+	// on a 16-block grid, nearest rings first; y=any tries the cave levels (y -48..48, every 16)
+	int64_t R2 = (int64_t)nd.radius * nd.radius;
+	int steps = nd.radius / 16;
+	int y0 = nd.y == Y_ANY ? -48 : nd.y, y1 = nd.y == Y_ANY ? 48 : nd.y;
+	for (int r = 0; r <= steps; r++)
+		for (int dz = -r; dz <= r; dz++)
+			for (int dx = -r; dx <= r; dx++) {
+				if (dx != -r && dx != r && dz != -r && dz != r) continue;
+				int bx = ax + dx * 16, bz = az + dz * 16;
+				if (dist2(bx, bz, ax, az) > R2) continue;
+				for (int y = y0; y <= y1; y += 16)
+					if (biomeAt(*c.w, *c.pk, bx >> 2, y >> 2, bz >> 2, 0) == nd.biome) {
+						addHit(c, -1 - nd.biome, bx, bz, depth);
+						return true;
+					}
+			}
+	return false;
+}
+
+HD const SetDev* ringSet(const StructTables& T) {
+	for (int si = 0; si < T.nsets; si++)
+		if (T.sets[si].type == SET_RINGS) return &T.sets[si];
+	return nullptr;
+}
+
+// Strongholds within radius (+slack) of the anchor. A stronghold ends up within 112 blocks (+ chunk
+// rounding) of its raw ring position, so only those whose raw position could be in range get the
+// expensive biome search; PRE mode decides on raw positions alone.
+HDN void shResolve(EvalCtx& c, const SetDev& ring, int i) {
+	if ((c.shDone >> i) & 1) return;
+	strongholdResolve(*c.w, *c.pk, ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], c.shX[i], c.shZ[i]);
+	c.shDone |= 1u << i;
+}
+
+HDN bool evalStronghold(EvalCtx& c, const Node& nd, int ni, int ax, int az, int slack, int depth) {
+	const SetDev* ring = ringSet(*c.T);
+	if (!ring) return false;
+	if (c.shRaw < 0) c.shRaw = strongholdRings(c.seed, *ring, MAX_STRONGHOLDS, c.shRawX, c.shRawZ, c.shFork);
+	const int margin = 112 + 24;  // final position vs raw ring chunk centre
+	int64_t R = nd.radius + slack;
+	int64_t Rout = R + margin, Rin = R - margin, R2 = R * R;
+	bool children = nd.first >= 0;
+	// decide without biome searches where the bound settles it: certainly in (raw well inside), certainly
+	// out (raw well outside); only borderline ones are resolved. Children need exact positions.
+	int n = 0, pick[MAX_STRONGHOLDS], np = 0;
+	for (int i = 0; i < c.shRaw && n < nd.count; i++) {
+		int64_t d2 = dist2(c.shRawX[i] * 16 + 8, c.shRawZ[i] * 16 + 8, ax, az);
+		if (d2 > Rout * Rout) continue;
+		if (c.mode == EVAL_PRE || (!children && Rin > 0 && d2 <= Rin * Rin)) {
+			n++;
+			pick[np++] = i;
+			continue;
+		}
+		shResolve(c, *ring, i);
+		int x = c.shX[i] * 16 + 4, z = c.shZ[i] * 16 + 4;
+		if (dist2(x, z, ax, az) > R2) continue;
+		if (children) {
+			int mark = c.hit ? c.hit->n : 0;
+			addHit(c, WHAT_STRONGHOLD, x, z, depth);
+			if (evalChildren(c, ni, x, z, 0, depth + 1)) n++;
+			else if (c.hit) c.hit->n = mark;
+		} else {
+			n++;
+			pick[np++] = i;
+		}
+	}
+	if (n < nd.count) return false;
+	if (c.mode == EVAL_B && c.hit && !children)  // matched: exact coordinates for the report only
+		for (int k = 0; k < np; k++) {
+			shResolve(c, *ring, pick[k]);
+			addHit(c, WHAT_STRONGHOLD, c.shX[pick[k]] * 16 + 4, c.shZ[pick[k]] * 16 + 4, depth);
+		}
+	return true;
+}
+
+HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth) {
+	const Node& nd = c.q->n[ni];
+	switch (nd.kind) {
+	case N_ALL:
+		return evalChildren(c, ni, ax, az, slack, depth);
+	case N_ANY: {
+		bool any = false;
+		for (int k = nd.first; k >= 0 && !any; k = c.q->n[k].next) {
+			int mark = c.hit ? c.hit->n : 0;
+			any = evalNode(c, k, ax, az, slack, depth);
+			if (!any && c.hit) c.hit->n = mark;
+		}
+		return any || nd.first < 0;
+	}
+	case N_NOT: {
+		if (c.mode != EVAL_B) return true;  // can't prune on a negation before the exact check
+		Hit* h = c.hit;
+		c.hit = nullptr;  // what a NOT found isn't a match
+		bool inner = evalChildren(c, ni, ax, az, slack, depth);
+		c.hit = h;
+		return !inner;
+	}
+	case N_STRUCTURE:
+		return evalStructure(c, nd, ni, ax, az, slack, depth);
+	case N_BIOME:
+		return c.mode != EVAL_B || evalBiome(c, nd, ax, az, depth);
+	case N_STRONGHOLD:
+		return c.mode == EVAL_A || evalStronghold(c, nd, ni, ax, az, slack, depth);
+	case N_SPAWN:
+		return c.mode != EVAL_B || dist2(c.spawnX, c.spawnZ, 0, 0) <= (int64_t)nd.radius * nd.radius;
+	case N_BUILDING:
+		return c.mode != EVAL_B || evalBuilding(c, nd, ax, az, depth);
+	}
+	return false;
+}
+
+// Stage A: placement-only, depends on the low 48 bits only.
+HDN bool stageA(const StructTables& T, const Query& q, uint64_t seed) {
+	EvalCtx c{};
+	c.T = &T;
+	c.q = &q;
+	c.seed = seed;
+	c.mode = EVAL_A;
+	return evalNode(c, q.root, 0, 0, q.anchorSpawn ? q.slack : 0, 0);
 }
 
 // Stage B: full check for one 64-bit seed. w must be worldInit'ed for that seed.
 HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const Query& q, Hit& hit) {
-	uint64_t seed = (uint64_t)w.seed;
+	EvalCtx c{};
+	c.w = &w;
+	c.pk = &pk;
+	c.T = &T;
+	c.q = &q;
+	c.seed = (uint64_t)w.seed;
+	c.curStructure = -1;
+	c.shRaw = -1;
 	hit.seed = w.seed;
 	hit.n = 0;
+	hit.spawnX = hit.spawnZ = 0;
+	// cheap necessary pass first (structures with biome checks, around 0,0 with slack), then the spawn
+	c.mode = EVAL_PRE;
+	if (!q.exact && !evalNode(c, q.root, 0, 0, q.anchorSpawn ? q.slack : 0, 0)) return false;
 	int ax = 0, az = 0;
-	// cheap necessary pass first: structure conditions around the origin with slack
-	for (int ci = 0; ci < q.ncond; ci++) {
-		const Cond& c = q.c[ci];
-		if (c.kind != COND_STRUCTURE) continue;
-		int R = c.radius + (q.anchorSpawn ? q.slack : 0);
-		int64_t R2 = (int64_t)R * R;
-		int n = 0;
-		for (int si = 0; si < T.nsets && n < c.count; si++) {
-			if (!((c.setMask >> si) & 1) || T.sets[si].type != SET_SPREAD) continue;
-			const SetDev& s = T.sets[si];
-			int c0 = (-R - 8) >> 4, c1 = (R + 8) >> 4;
-			int r0 = floorDiv(c0, s.spread.spacing), r1 = floorDiv(c1, s.spread.spacing);
-			for (int rx = r0; rx <= r1 && n < c.count; rx++)
-				for (int rz = r0; rz <= r1 && n < c.count; rz++) {
-					int px, pz;
-					spreadCandidate(s.spread, seed, rx, rz, px, pz);
-					if (dist2(px * 16 + 8, pz * 16 + 8, 0, 0) > R2 || !isStructureChunk(T, si, seed, px, pz)) continue;
-					int st = structureAt(w, pk, T, si, px, pz);
-					if (st >= 0 && ((c.structMask >> st) & 1)) n++;
-				}
-		}
-		if (n < c.count) return false;
-	}
-	if (q.anchorSpawn) spawnOrigin(w, pk, ax, az);
-	hit.spawnX = ax;
-	hit.spawnZ = az;
-	for (int ci = 0; ci < q.ncond; ci++) {
-		const Cond& c = q.c[ci];
-		int64_t R2 = (int64_t)c.radius * c.radius;
-		if (c.kind == COND_SPAWN) {
-			if (dist2(ax, az, 0, 0) > R2) return false;
-		} else if (c.kind == COND_STRUCTURE) {
-			int n = 0;
-			for (int si = 0; si < T.nsets && n < c.count; si++) {
-				if (!((c.setMask >> si) & 1) || T.sets[si].type != SET_SPREAD) continue;
-				const SetDev& s = T.sets[si];
-				int r0x = floorDiv((ax - c.radius - 8) >> 4, s.spread.spacing), r1x = floorDiv((ax + c.radius + 8) >> 4, s.spread.spacing);
-				int r0z = floorDiv((az - c.radius - 8) >> 4, s.spread.spacing), r1z = floorDiv((az + c.radius + 8) >> 4, s.spread.spacing);
-				for (int rx = r0x; rx <= r1x && n < c.count; rx++)
-					for (int rz = r0z; rz <= r1z && n < c.count; rz++) {
-						int px, pz;
-						spreadCandidate(s.spread, seed, rx, rz, px, pz);
-						if (dist2(px * 16 + 8, pz * 16 + 8, ax, az) > R2 || !isStructureChunk(T, si, seed, px, pz)) continue;
-						int st = structureAt(w, pk, T, si, px, pz);
-						if (st >= 0 && ((c.structMask >> st) & 1)) {
-							n++;
-							if (hit.n < MAX_HITS) {
-								hit.x[hit.n] = px * 16 + 8;
-								hit.z[hit.n] = pz * 16 + 8;
-								hit.what[hit.n++] = st;
-							}
-						}
-					}
-			}
-			if (n < c.count) return false;
-		} else if (c.kind == COND_BIOME) {
-			// surface-ish biome (y=64) on a 16-block grid, nearest rings first
-			bool found = false;
-			int steps = c.radius / 16;
-			for (int r = 0; r <= steps && !found; r++)
-				for (int dz = -r; dz <= r && !found; dz++)
-					for (int dx = -r; dx <= r && !found; dx++) {
-						if (dx != -r && dx != r && dz != -r && dz != r) continue;
-						int bx = ax + dx * 16, bz = az + dz * 16;
-						if (dist2(bx, bz, ax, az) > R2) continue;
-						if (biomeAt(w, pk, bx >> 2, 16, bz >> 2, 0) == c.biome) {
-							found = true;
-							if (hit.n < MAX_HITS) {
-								hit.x[hit.n] = bx;
-								hit.z[hit.n] = bz;
-								hit.what[hit.n++] = -1 - c.biome;
-							}
-						}
-					}
-			if (!found) return false;
-		} else if (c.kind == COND_STRONGHOLD) {
-			int sx[8], sz[8], n = 0;
-			for (int si = 0; si < T.nsets; si++)
-				if (T.sets[si].type == SET_RINGS) {
-					int got = strongholds(w, pk, T.sets[si], 3, sx, sz);  // first ring
-					for (int i = 0; i < got; i++)
-						if (dist2(sx[i] * 16 + 4, sz[i] * 16 + 4, ax, az) <= R2) {
-							n++;
-							if (hit.n < MAX_HITS) {
-								hit.x[hit.n] = sx[i] * 16 + 4;
-								hit.z[hit.n] = sz[i] * 16 + 4;
-								hit.what[hit.n++] = -1000;
-							}
-						}
-				}
-			if (n < c.count) return false;
-		}
-	}
-	return true;
+	if (q.anchorSpawn || q.needSpawn) spawnOrigin(w, pk, ax, az);
+	hit.spawnX = c.spawnX = ax;
+	hit.spawnZ = c.spawnZ = az;
+	if (!q.anchorSpawn) ax = az = 0;
+	c.mode = EVAL_B;
+	c.hit = &hit;
+	return evalNode(c, q.root, ax, az, 0, 0);
 }
 
 }  // namespace sw
