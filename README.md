@@ -35,6 +35,7 @@ oracle mod (real dedicated server, 2 seeds per version):
 | structure placement candidates (spread, frequency reducers, exclusion zones) | all sets within 40 chunks, identical |
 | terrain height (`getBaseHeight` WORLD_SURFACE_WG: final density + aquifer, `engine/terrain.h`), 26.3 only | 399 052 village-footprint columns, identical |
 | village / outpost layouts with that terrain (26.3) | 79/79 starts piece for piece (`village-verify`) |
+| chest loot (`loot-verify`): village containers (26.3), buried treasure (26.3, 1.21.4) | every container at its place; every predictable one with the game's LootTableSeed and items (60/60 village, 52/52 buried; 5 search hits confirmed blind) |
 
 **Approximate:** whether a structure actually starts (its biome check uses the terrain height there).
 Seedwright uses the depth=0 surface instead. Result on the truth seeds: 126/127 starts match (84/84 and
@@ -63,6 +64,10 @@ engine/seedwright-gpu packs/26.3.pack search --where \
 engine/seedwright-gpu packs/26.3.pack search --where \
   'biome lush_caves within 100 at y=any, any { trial_chambers within 600, ancient_city within 800 }'
 
+# a village whose chests hold at least 2 diamonds and some obsidian (26.3), and a buried treasure with 2+ diamonds
+engine/seedwright-gpu packs/26.3.pack search --where \
+  'village within 400 { loot 2 diamond, loot obsidian }, buried_treasure within 300 { loot 2 diamond }'
+
 # check given seeds (always exact)
 engine/seedwright-cpu packs/1.21.4.pack search --cpu --where 'trial_chambers within 400' --seeds 12345,8675309
 ```
@@ -77,6 +82,7 @@ Conditions are separated by `,` (or `and`); everything is measured from the worl
 | `biome NAME within R [at y=Y \| at y=any]` | biome on a 16-block grid; default y=64; `y=any` tries y -48..48 (cave biomes: `lush_caves`, `dripstone_caves`, `deep_dark`) |
 | `[N] strongholds within R [{ ... }]` | strongholds from any ring (up to 32) |
 | `[N] BUILDING` | inside a village's `{ }`: at least N of that building in that one village, e.g. `2 blacksmith`, `library`, `temple` (exact on 26.3, see below) |
+| `loot [N] ITEM` | inside a village's or buried treasure's `{ }`: at least N of that item over all its chests, e.g. `loot 2 diamond`, `loot obsidian` (see below) |
 | `spawn within R` | the world spawn itself is within R blocks of 0,0 (only useful for "spawn near the map centre") |
 | `any { a, b }`, `all { a, b }`, `not X`, `a or b`, `( )` | logic |
 
@@ -100,6 +106,22 @@ estimated layout is only a prefilter (it needs `count - --building-slack` buildi
 ~85% of real matches) and every reported seed is re-checked with exact heights on the CPU. `--all-buildings` skips
 the prefilter (finds every match, much slower). `--seeds` checks are always exact. Versions before 26.3 (double
 precision engine) have no exact terrain yet: there building counts are still estimates and the CLI warns about it.
+
+**Chest loot** (`loot [N] ITEM`; GUI block "chest loot"). A chest's contents are fixed when the chunk generates:
+its LootTableSeed is the next draw of the chunk's decoration random (Xoroshiro, seeded from the world seed, the
+chunk, and the structure's index in its generation step) when the chest is placed. `engine/loot.h` replays that
+from the exact village layout (pieces in order, each template's containers in palette order, only those in that
+chunk) and rolls the loot table (pools, weights, counts) with the seed. Exact on 26.3 for villages and on every
+version for buried treasure (decided on the GPU at full speed); village layouts before 26.3 are estimates, so
+village loot is refused there. One gap: a village chest whose chunk had a decoration piece placed before it
+(tree, hay pile, flowers: they draw from the same random a terrain-dependent number of times) can't be
+predicted. It never counts, so about 1 village chest in 7 is ignored: some real matches are missed, none are false.
+Village loot is checked on the CPU after the GPU's building prefilter, like buildings (e.g. `village within 400
+{ loot 2 diamond }`: 3 results in ~3 s). `seedwright <pack> loot <seed> <structure> <chunkX> <chunkZ>` lists
+one start's containers with their seeds and items; `loot-verify truth/<v>/loot-*.txt` compares with the oracle
+(`oracle/tools/truth.sh "loot=40" <seeds>`). Villager trades are not seed-determined (26.3 rolls them from a
+world-wide random sequence in whatever order villagers in loaded chunks first need their offers), so there is no
+trade filter.
 
 **Rare layouts** (`--layout`, GUI tab "Rare layouts"; always measured from 0,0): instead of scanning low-48 seeds,
 generate only the structure seeds that put a required structure where the query allows it. For one top-level
@@ -130,7 +152,10 @@ puts it in `/usr/share/applications` for launchers that only read that, like tux
 
 Pipeline: stage A tests only the low 48 bits (structure placement is pure LCG) at ~5.7 G seeds/s on an
 RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome/spawn checks
-(~185 k seeds/s on 26.3, ~60 k on legacy versions; CPU about 1/3 of that on 16 threads).
+(26.3: ~127 k seeds/s for `village within 400`, ~45 k for `biome cherry_grove within 300`; CPU about 1/5 of
+that on 16 threads). Biome conditions reject most grid points after the temperature and humidity noises alone
+(exact: a non-wanted climate leaf that contains a wanted one in every unknown dimension and is closer in the known
+ones wins whatever the rest gives).
 
 ## Layout
 
@@ -138,6 +163,7 @@ RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome
 - `engine/structures.h`: structure validation, strongholds
 - `engine/query.h`, `engine/query_parse.h`: the condition tree (stage A / prefilter / exact evaluation) and the query language
 - `engine/jigsaw.h`: village (jigsaw) layouts
+- `engine/loot.h`, `engine/loot_cli.h`: chest loot (container seeds, loot tables; `loot`, `loot-verify`)
 - `engine/terrain.h`: exact terrain height (26.3 density samplers + aquifer, host only)
 - `engine/pack.h`: version-pack loader, RTree build
 - `tools/extract.py`: vanilla jar (+ oracle biome list) → `packs/<version>.pack`
