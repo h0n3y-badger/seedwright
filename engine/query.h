@@ -77,6 +77,7 @@ struct EvalCtx {
 	int npcs, layoutSt, layoutCx, layoutCz;
 	const HeightGrid* hg;  // exact terrain heights (host, terrain.h); null: estimateSurfaceY
 	int prefilter;         // building conditions are a necessary-condition prefilter (see Query.buildingSlack)
+	int maxPcs;            // size of pcs
 };
 
 HDN bool hasBuildingBelow(const Query* q, int ni) {
@@ -229,9 +230,10 @@ HDN bool evalBuilding(EvalCtx& c, const Node& nd, int depth) {
 	int need = c.prefilter ? nd.count - c.q->buildingSlack : nd.count;
 	if (need <= 0) return true;
 	if (c.layoutSt != c.curStructure || c.layoutCx != c.curCx || c.layoutCz != c.curCz) {
-		c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, MAX_PIECES, c.hg);
+		c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, c.maxPcs, c.hg);
 		c.layoutSt = c.curStructure, c.layoutCx = c.curCx, c.layoutCz = c.curCz;
 	}
+	if (c.npcs < 0 && c.prefilter) return true;  // more pieces than the buffer holds: let the exact check decide
 	int n = 0;
 	for (int i = 0; i < c.npcs && n < need; i++) {
 		int cat = pieceCategory(*c.J, c.pcs[i]);
@@ -295,7 +297,7 @@ HDN bool stageA(const StructTables& T, const Query& q, uint64_t seed) {
 // with hg (terrain.h heights, host only); prefilter = necessary condition for that exact check (estimated
 // layouts with Query.buildingSlack); neither: estimated layouts taken at face value (approximate).
 HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const Query& q, Hit& hit, const JigsawTables* J = nullptr,
-                Piece* pieces = nullptr, const HeightGrid* hg = nullptr, bool prefilter = false) {
+                Piece* pieces = nullptr, const HeightGrid* hg = nullptr, bool prefilter = false, int maxPieces = MAX_PIECES) {
 	EvalCtx c{};
 	c.w = &w;
 	c.pk = &pk;
@@ -308,6 +310,7 @@ HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const 
 	c.pcs = pieces;
 	c.layoutSt = -1;
 	c.hg = hg;
+	c.maxPcs = maxPieces;
 	c.prefilter = prefilter && q.hasBuildings;
 	hit.seed = w.seed;
 	hit.n = 0;

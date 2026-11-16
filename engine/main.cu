@@ -403,8 +403,8 @@ static bool stageBExact(const Pack& P, const StructTables& T, const Query& q, co
 	worldInit(w, *P.dev, seed);
 	TerrainWorld tw(TR, seed);
 	HeightGrid g = terrainGrid(tw);
-	pcs.resize(MAX_PIECES);
-	return stageB(w, *P.dev, T, q, h, jig(P).t.get(), pcs.data(), &g, false);
+	pcs.resize(1024);  // no device stack limit here: never truncate a big village (they reach ~300)
+	return stageB(w, *P.dev, T, q, h, jig(P).t.get(), pcs.data(), &g, false, (int)pcs.size());
 }
 
 static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt, const Terrain* TR) {

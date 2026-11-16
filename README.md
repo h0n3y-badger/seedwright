@@ -19,6 +19,8 @@ oracle mod (real dedicated server, 2 seeds per version):
 | spawn origin chunk (NoiseSpawnFinder) | identical |
 | strongholds (first ring sets, 12 positions) | identical |
 | structure placement candidates (spread, frequency reducers, exclusion zones) | all sets within 40 chunks, identical |
+| terrain height (`getBaseHeight` WORLD_SURFACE_WG: final density + aquifer, `engine/terrain.h`), 26.3 only | 399 052 village-footprint columns, identical |
+| village / outpost layouts with that terrain (26.3) | 79/79 starts piece for piece (`village-verify`) |
 
 **Approximate:** whether a structure actually starts (its biome check uses the terrain height there).
 Seedwright uses the depth=0 surface instead. Result on the truth seeds: 126/127 starts match (84/84 and
@@ -60,7 +62,7 @@ Conditions are separated by `,` (or `and`); everything is measured from the worl
 | `[N] STRUCTURE within R [{ ... }]` | at least N (default 1) within R blocks; inside `{ }` is measured from that structure |
 | `biome NAME within R [at y=Y \| at y=any]` | biome on a 16-block grid; default y=64; `y=any` tries y -48..48 (cave biomes: `lush_caves`, `dripstone_caves`, `deep_dark`) |
 | `[N] strongholds within R [{ ... }]` | strongholds from any ring (up to 32) |
-| `[N] BUILDING` | inside a village's `{ }`: buildings in its layout, e.g. `2 blacksmith`, `library`, `temple` (approximate, see below) |
+| `[N] BUILDING` | inside a village's `{ }`: at least N of that building in that one village, e.g. `2 blacksmith`, `library`, `temple` (exact on 26.3, see below) |
 | `spawn within R` | the world spawn itself is within R blocks of 0,0 (only useful for "spawn near the map centre") |
 | `any { a, b }`, `all { a, b }`, `not X`, `a or b`, `( )` | logic |
 
@@ -76,10 +78,14 @@ Options: `--start/--count` (low-48 range), `--max N`, `--slack B`, `--cpu`, `--s
 `--slack` (default 256) is a speed shortcut for searches: seeds whose spawn is farther than that from 0,0 are skipped
 (about 2% of seeds at 256). `--seeds` checks never use it.
 
-**Village buildings are approximate.** Layout assembly (jigsaw) matches vanilla piece for piece when given vanilla's
-terrain heights (149/149 villages and outposts against the oracle), but seedwright still estimates terrain height,
-and layouts are chaotic in it: per-category building counts agree with the game ~66% of the time. Use building
-conditions to find candidates, then check in game. Exact terrain height makes them exact without query changes.
+**Village buildings.** Jigsaw layouts depend on the terrain height at every terrain-matching connection, and are
+chaotic in it: with an estimated height only ~66% of per-building counts match the game (and 25-40% of villages
+reported for ">= N" were wrong). On 26.3 seedwright computes vanilla's exact terrain height (`engine/terrain.h`, a port
+of the 26.3 density samplers + aquifer, ~24 ms per village on one CPU thread), so building results are exact: the
+estimated layout is only a prefilter (it needs `count - --building-slack` buildings, default slack 1, which keeps
+~85% of real matches) and every reported seed is re-checked with exact heights on the CPU. `--all-buildings` skips
+the prefilter (finds every match, much slower). `--seeds` checks are always exact. Versions before 26.3 (double
+precision engine) have no exact terrain yet: there building counts are still estimates and the CLI warns about it.
 
 GUI (PySide6): `python3 gui/seedwright_gui.py`. Scratch-style blocks for the same language: drag blocks from the
 palette into the script, drop blocks into C-blocks (structures, strongholds, all/any/none) to measure them from
@@ -98,6 +104,7 @@ RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome
 - `engine/structures.h`: structure validation, strongholds
 - `engine/query.h`, `engine/query_parse.h`: the condition tree (stage A / prefilter / exact evaluation) and the query language
 - `engine/jigsaw.h`: village (jigsaw) layouts
+- `engine/terrain.h`: exact terrain height (26.3 density samplers + aquifer, host only)
 - `engine/pack.h`: version-pack loader, RTree build
 - `tools/extract.py`: vanilla jar (+ oracle biome list) → `packs/<version>.pack`
 - `oracle/` (26.x, unobfuscated Loom) and `oracle-legacy/` (1.21.x, remapping Loom): headless ground-truth mod;
@@ -106,7 +113,8 @@ RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome
 
 ## Not done yet
 
-- exact terrain height (final density) → exact structure starts, exact village buildings, real spawn block, surface biomes
+- exact terrain height before 26.3 (legacy double NoiseChunk); on 26.3 it is only used for village buildings so far:
+  structure start checks, the spawn block and surface biomes still use the estimate
 - ores (decoration seeds + ore placement + whether the blocks survive terrain/caves)
 - `--biome` at the real surface; nether/end
 - GPU stage B is one thread per seed; a block-per-seed version would be much faster

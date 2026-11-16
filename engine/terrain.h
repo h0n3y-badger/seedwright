@@ -356,6 +356,13 @@ private:
 	uint64_t posLo = 0, posHi = 0, aqLo = 0, aqHi = 0;
 	std::vector<CacheCell> cells;
 	std::unordered_map<uint64_t, int> memo;
+	// Across columns (values are position-wise, so sharing them is exact; only which volumes the per-column cache
+	// cells hold differs, which a point query could see as a 1-ulp volume/point difference - never observed):
+	std::unordered_map<uint64_t, terr::Buf> cornerMemo;  // interpolated input at one cell-corner column, whole height
+	std::unordered_map<int64_t, int> surfVol, surfPt;     // floor(preliminary surface) per quart, volume / point path
+	static uint64_t cornerKey(int si, int x, int z) {
+		return ((uint64_t)si << 54) ^ ((uint64_t)(uint32_t)(x & 0x7FFFFFF) << 27) ^ (uint64_t)(uint32_t)(z & 0x7FFFFFF);
+	}
 
 	// ---------------------------------------------------------------- setup
 
@@ -1106,7 +1113,24 @@ private:
 		Vol cv = terr::vol(floorModI(v.maxX(), cxz) == 0 ? ccx : ccx + 1, floorModI(v.maxY(), cy) == 0 ? ccy : ccy + 1,
 		                   floorModI(v.maxZ(), cxz) == 0 ? ccz : ccz + 1, mnx * cxz, mny * cy, mnz * cxz, cxz, cy, cxz);
 		terr::Buf cb(cv.size());
-		volume(s.a, cb.data(), cv);
+		int yc0 = floorDivI(T.minY, cy), yc1 = floorDivI(T.minY + T.height - 1, cy) + 1, ny = yc1 - yc0 + 1;
+		if (cv.sty == cy && cv.y0 >= yc0 * cy && cv.y0 + (cv.sy - 1) * cy <= yc1 * cy) {
+			int off = (cv.y0 - yc0 * cy) / cy;
+			for (int iz = 0; iz < cv.sz; iz++)
+				for (int ix = 0; ix < cv.sx; ix++) {
+					int X = cv.bx(ix), Z = cv.bz(iz);
+					uint64_t key = cornerKey((int)(&s - smp.data()), X, Z);
+					auto it = cornerMemo.find(key);
+					if (it == cornerMemo.end()) {
+						terr::Buf col(ny);
+						volume(s.a, col.data(), terr::vol(1, ny, 1, X, yc0 * cy, Z, cxz, cy, cxz));
+						it = cornerMemo.emplace(key, std::move(col)).first;
+					}
+					for (int iy = 0; iy < cv.sy; iy++) cb[cv.idx(ix, iy, iz)] = it->second[off + iy];
+				}
+		} else {
+			volume(s.a, cb.data(), cv);
+		}
 		for (int cz = 0; cz < ccz; cz++) {
 			int ncz = std::min(cz + 1, cv.sz - 1);
 			for (int cx = 0; cx < ccx; cx++) {
@@ -1170,7 +1194,8 @@ private:
 		int qx = (bx >> 2) << 2, qz = (bz >> 2) << 2;
 		auto it = A.surface.find(chunkPack(qx, qz));
 		if (it != A.surface.end()) return it->second;
-		int v = (int)floor((double)value(rootSurface, qx, 0, qz));
+		auto m = surfPt.find(chunkPack(qx, qz));
+		int v = m != surfPt.end() ? m->second : (surfPt[chunkPack(qx, qz)] = (int)floor((double)value(rootSurface, qx, 0, qz)));
 		A.surface[chunkPack(qx, qz)] = v;
 		return v;
 	}
@@ -1348,12 +1373,19 @@ private:
 			int bx0 = A.minGX << 4, bz0 = A.minGZ << 4, bx1 = (maxGX << 4) + 9, bz1 = (maxGZ << 4) + 9;
 			int qx0 = bx0 >> 2, qx1 = bx1 >> 2, qz0 = bz0 >> 2, qz1 = bz1 >> 2;
 			Vol sv = terr::vol(qx1 - qx0 + 1, 1, qz1 - qz0 + 1, qx0 << 2, 0, qz0 << 2, 4, 1, 4);
-			terr::Buf sb(sv.size());
-			volume(rootSurface, sb.data(), sv);
+			bool all = true;
+			for (int zz = 0; zz < sv.sz && all; zz++)
+				for (int xx = 0; xx < sv.sx && all; xx++) all = surfVol.count(chunkPack(sv.bx(xx), sv.bz(zz))) != 0;
+			if (!all) {
+				terr::Buf sb(sv.size());
+				volume(rootSurface, sb.data(), sv);
+				for (int zz = 0; zz < sv.sz; zz++)
+					for (int xx = 0; xx < sv.sx; xx++) surfVol[chunkPack(sv.bx(xx), sv.bz(zz))] = (int)floor((double)sb[sv.idx(xx, 0, zz)]);
+			}
 			int maxY = INT32_MIN;
 			for (int zz = 0; zz < sv.sz; zz++)
 				for (int xx = 0; xx < sv.sx; xx++) {
-					int sl = (int)floor((double)sb[sv.idx(xx, 0, zz)]);
+					int sl = surfVol[chunkPack(sv.bx(xx), sv.bz(zz))];
 					A.surface[chunkPack(sv.bx(xx), sv.bz(zz))] = sl;
 					maxY = std::max(maxY, sl);
 				}
