@@ -12,6 +12,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <omp.h>
 
 namespace sw {
 
@@ -481,6 +482,71 @@ inline int jigsawCommand(const Pack& P, const StructTables& T, int argc, char** 
 		double t1 = now();
 		printf("heights: %lld/%lld exact (%.3f ms per column)\n", n - bad, n, (t1 - t0) * 1e3 / std::max(1LL, n));
 		return bad ? 1 : 0;
+	}
+
+	if (cmd == "village-compare") {  // estimated vs exact-terrain building counts over many villages (prefilter recall)
+		Terrain TR;
+		if (!TR.load(argv[1])) {
+			fprintf(stderr, "%s\n", TR.error.c_str());
+			return 2;
+		}
+		int N = argc > 3 ? atoi(argv[3]) : 200;
+		int vs = -1;
+		for (size_t i = 0; i < P.sets.size(); i++)
+			if (P.sets[i].name == "villages") vs = (int)i;
+		// per village: per category (est, exact)
+		std::vector<std::vector<std::array<int, 2>>> rows(N);
+		std::vector<int> villagesPer(N);
+		double t0 = now();
+#pragma omp parallel for schedule(dynamic, 1)
+		for (int i = 0; i < N; i++) {
+			int64_t seed = benchSeed(i);
+			World* w = new World();
+			worldInit(*w, pk, seed);
+			TerrainWorld tw(TR, seed);
+			HeightGrid eg = terrainGrid(tw);
+			std::vector<Piece> b1(CLI_MAX_PIECES), b2(CLI_MAX_PIECES);
+			for (int rx = -1; rx <= 0; rx++)
+				for (int rz = -1; rz <= 0; rz++) {
+					int px, pz;
+					spreadCandidate(T.sets[vs].spread, (uint64_t)seed, rx, rz, px, pz);
+					int st = jigsawStructureAt(*w, pk, T, J, vs, px, pz, &eg);
+					if (st < 0) continue;
+					int n1 = jigsawLayout(*w, pk, J, st, px, pz, b1.data(), (int)b1.size());
+					int n2 = jigsawLayout(*w, pk, J, st, px, pz, b2.data(), (int)b2.size(), &eg);
+					std::vector<std::array<int, 2>> c(H.categories.size(), {0, 0});
+					for (int k = 0; k < n1; k++) {
+						int q = pieceCategory(J, b1[k]);
+						if (q >= 0) c[q][0]++;
+					}
+					for (int k = 0; k < n2; k++) {
+						int q = pieceCategory(J, b2[k]);
+						if (q >= 0) c[q][1]++;
+					}
+					for (int k : H.structCategories[J.structOf[st]]) rows[i].push_back(c[k]);
+					villagesPer[i]++;
+				}
+			delete w;
+		}
+		int villages = 0;
+		for (int v : villagesPer) villages += v;
+		printf("%d villages (%.0f ms each with exact terrain incl. estimate)\n", villages, (now() - t0) * 1e3 / std::max(1, villages) * omp_get_max_threads());
+		for (int need = 1; need <= 4; need++)
+			for (int slack = 0; slack <= 2 && slack < need; slack++) {
+				long long truth = 0, kept = 0, keptTrue = 0, falsePos = 0;
+				for (auto& r : rows)
+					for (auto& c : r) {
+						bool t = c[1] >= need, k = c[0] >= need - slack;
+						truth += t;
+						kept += k;
+						keptTrue += k && t;
+						falsePos += c[0] >= need && !t;
+					}
+				printf("  >= %d of a category: %lld true (village, category) pairs; estimate >= %d keeps %lld (recall %.1f%%), "
+				       "estimate alone would report %lld false\n",
+				       need, truth, need - slack, kept, 100.0 * keptTrue / std::max(1LL, truth), falsePos);
+			}
+		return 0;
 	}
 
 	if (cmd == "village-bench") {  // single thread: villages around the origin of N seeds; --gpu M: GPU run checked against CPU

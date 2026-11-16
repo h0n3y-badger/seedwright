@@ -493,7 +493,6 @@ private:
 		const std::string& k = d.kind;
 		auto kid = [&](int i) { return compile(d.kids[i]); };
 		int out;
-		float cv;
 		if (k == "const") {
 			S s = mk(K_CONST);
 			s.f0 = fbits(d.ints[0]);

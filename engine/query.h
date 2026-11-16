@@ -14,7 +14,7 @@ enum NodeKind {
 	N_BIOME,       // biome within radius of the anchor at height y (or any of the cave levels)
 	N_STRONGHOLD,  // >= count strongholds within radius, each satisfying the children
 	N_SPAWN,       // world spawn within radius of 0,0 (independent of the anchor)
-	N_BUILDING,    // >= count buildings of a category in the enclosing village (approximate)
+	N_BUILDING,    // >= count buildings of a category in the enclosing village (exact with terrain.h heights, see stageB)
 };
 
 enum { MAX_NODES = 48, MAX_HITS = 32, MAX_DEPTH = 6, Y_ANY = -100000, MAX_STRONGHOLDS = 32, MAX_PIECES = 320 };
@@ -32,6 +32,9 @@ struct Query {
 	int nnodes, root, anchorSpawn, slack, needSpawn;
 	int hasBuildings;  // needs village layouts (jigsaw tables + a piece buffer)
 	int exact;  // skip the slack-based prefilter (checking given seeds: the prefilter assumes spawn within slack of 0,0)
+	// building prefilter (stageB with prefilter=true, estimated terrain; survivors are re-checked with exact heights):
+	int buildingSlack;  // estimated layout needs count - buildingSlack buildings (estimates miss real ones)
+	int buildingPass;   // 1: building conditions don't filter at all there (exhaustive: every candidate is laid out exactly)
 	Node n[MAX_NODES];
 };
 
@@ -72,7 +75,15 @@ struct EvalCtx {
 	const JigsawTables* J;           // null: old pack, plain structureAt
 	Piece* pcs;                      // MAX_PIECES layout buffer (global memory on the GPU)
 	int npcs, layoutSt, layoutCx, layoutCz;
+	const HeightGrid* hg;  // exact terrain heights (host, terrain.h); null: estimateSurfaceY
+	int prefilter;         // building conditions are a necessary-condition prefilter (see Query.buildingSlack)
 };
+
+HDN bool hasBuildingBelow(const Query* q, int ni) {
+	for (int k = q->n[ni].first; k >= 0; k = q->n[k].next)
+		if (q->n[k].kind == N_BUILDING || hasBuildingBelow(q, k)) return true;
+	return false;
+}
 
 HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth);
 
@@ -113,7 +124,7 @@ HDN bool evalStructure(EvalCtx& c, const Node& nd, int ni, int ax, int az, int s
 					continue;
 				}
 				if (!isStructureChunk(*c.T, si, c.seed, px, pz)) continue;
-				int st = c.J ? jigsawStructureAt(*c.w, *c.pk, *c.T, *c.J, si, px, pz) : structureAt(*c.w, *c.pk, *c.T, si, px, pz);
+				int st = c.J ? jigsawStructureAt(*c.w, *c.pk, *c.T, *c.J, si, px, pz, c.hg) : structureAt(*c.w, *c.pk, *c.T, si, px, pz);
 				if (st < 0 || !((nd.structMask >> st) & 1)) continue;
 				if (c.mode == EVAL_PRE) {
 					n++;
@@ -209,16 +220,20 @@ HDN bool evalStronghold(EvalCtx& c, const Node& nd, int ni, int ax, int az, int 
 	return true;
 }
 
-// Buildings of the enclosing village (layout from jigsaw.h; heights estimated -> approximate). The layout
-// is cached for the innermost enclosing structure.
+// Buildings of the enclosing village (layout from jigsaw.h; exact with c.hg = terrain.h heights, otherwise
+// the heights are estimated and the layout is only roughly vanilla's). The layout is cached for the innermost
+// enclosing structure. As a prefilter (c.prefilter) the estimated layout needs count - buildingSlack.
 HDN bool evalBuilding(EvalCtx& c, const Node& nd, int depth) {
 	if (!c.J || !c.pcs || c.curStructure < 0) return false;
+	if (c.prefilter && c.q->buildingPass) return true;
+	int need = c.prefilter ? nd.count - c.q->buildingSlack : nd.count;
+	if (need <= 0) return true;
 	if (c.layoutSt != c.curStructure || c.layoutCx != c.curCx || c.layoutCz != c.curCz) {
-		c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, MAX_PIECES);
+		c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, MAX_PIECES, c.hg);
 		c.layoutSt = c.curStructure, c.layoutCx = c.curCx, c.layoutCz = c.curCz;
 	}
 	int n = 0;
-	for (int i = 0; i < c.npcs && n < nd.count; i++) {
+	for (int i = 0; i < c.npcs && n < need; i++) {
 		int cat = pieceCategory(*c.J, c.pcs[i]);
 		if (cat < 0 || !((nd.cat[cat >> 6] >> (cat & 63)) & 1)) continue;
 		n++;
@@ -226,7 +241,7 @@ HDN bool evalBuilding(EvalCtx& c, const Node& nd, int depth) {
 		pieceBoxAbs(c.pcs[i], c.curCx, c.curCz, b);
 		addHit(c, WHAT_BUILDING0 - cat, (b[0] + b[3]) / 2, (b[2] + b[5]) / 2, depth);
 	}
-	return n >= nd.count;
+	return n >= need;
 }
 
 HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth) {
@@ -245,6 +260,7 @@ HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth) {
 	}
 	case N_NOT: {
 		if (c.mode != EVAL_B) return true;  // can't prune on a negation before the exact check
+		if (c.prefilter && hasBuildingBelow(c.q, ni)) return true;  // nor on a building prefilter
 		Hit* h = c.hit;
 		c.hit = nullptr;  // what a NOT found isn't a match
 		bool inner = evalChildren(c, ni, ax, az, slack, depth);
@@ -275,9 +291,11 @@ HDN bool stageA(const StructTables& T, const Query& q, uint64_t seed) {
 	return evalNode(c, q.root, 0, 0, q.anchorSpawn ? q.slack : 0, 0);
 }
 
-// Stage B: full check for one 64-bit seed. w must be worldInit'ed for that seed.
+// Stage B: full check for one 64-bit seed. w must be worldInit'ed for that seed. Building conditions: exact
+// with hg (terrain.h heights, host only); prefilter = necessary condition for that exact check (estimated
+// layouts with Query.buildingSlack); neither: estimated layouts taken at face value (approximate).
 HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const Query& q, Hit& hit, const JigsawTables* J = nullptr,
-                Piece* pieces = nullptr) {
+                Piece* pieces = nullptr, const HeightGrid* hg = nullptr, bool prefilter = false) {
 	EvalCtx c{};
 	c.w = &w;
 	c.pk = &pk;
@@ -289,6 +307,8 @@ HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const 
 	c.J = J;
 	c.pcs = pieces;
 	c.layoutSt = -1;
+	c.hg = hg;
+	c.prefilter = prefilter && q.hasBuildings;
 	hit.seed = w.seed;
 	hit.n = 0;
 	hit.spawnX = hit.spawnZ = 0;
