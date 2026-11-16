@@ -443,6 +443,7 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 		fprintf(stderr, "\nstage A: %llu of %llu low-48 seeds done (%.1f M/s), %llu survivors so far\n", (unsigned long long)std::min(off + n, count),
 		        (unsigned long long)count, (off + n) / std::max(1e-9, tA) / 1e6, (unsigned long long)survivors);
 	}
+	if (!survivors) fprintf(stderr, "hint: no seed in this range can place the structures this close (counts too high or distances too small for how far apart they spawn)\n");
 	fprintf(stderr, "done: %lld full seeds tested, %lld results\n", tested, std::min((long long)found, maxResults));
 	return 0;
 }
@@ -578,6 +579,7 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		}
 		if (tested) fprintf(stderr, "\n");
 	}
+	if (!survivors) fprintf(stderr, "hint: no seed in this range can place the structures this close (counts too high or distances too small for how far apart they spawn)\n");
 	fprintf(stderr, "done: %lld full seeds tested, %lld results\n", tested, std::min(found, maxResults));
 	return 0;
 }

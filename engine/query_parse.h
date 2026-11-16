@@ -312,7 +312,9 @@ private:
 		}
 		uint64_t sm;
 		uint32_t setm;
-		if (!isBuilding && structureMasks(name, sm, setm)) {
+		if (!isBuilding && !structureMasks(name, sm, setm) && name.size() > 1 && name.back() == 's')
+			structureMasks(name.substr(0, name.size() - 1), sm, setm);  // plural: "monuments", "igloos"
+		if (!isBuilding && sm) {
 			int n = newNode(N_STRUCTURE);
 			label[n] = name;
 			q.n[n].count = count;
@@ -325,14 +327,17 @@ private:
 		// a building of the enclosing village(s)
 		if (structCtx == 0) { pos--; fail("unknown structure '" + name + "'" + (isBuilding ? " (buildings only work inside a village's { })" : suggest(name))); }
 		uint64_t cat[3] = {0, 0, 0};
-		std::string key = buildingKey(name);
 		bool anyLayouts = false;
-		for (int st = 0; st < 64; st++)
-			if ((structCtx >> st) & 1 && st < (int)N.buildings.size())
-				for (auto& b : N.buildings[st]) {
-					anyLayouts = true;
-					if (buildingKey(b.first) == key) cat[b.second >> 6] |= 1ULL << (b.second & 63);
-				}
+		for (int pass = 0; pass < 2 && !(cat[0] | cat[1] | cat[2]); pass++) {  // pass 1: plural ("2 blacksmiths")
+			if (pass == 1 && (name.size() < 2 || name.back() != 's')) break;
+			std::string key = buildingKey(pass ? name.substr(0, name.size() - 1) : name);
+			for (int st = 0; st < 64; st++)
+				if ((structCtx >> st) & 1 && st < (int)N.buildings.size())
+					for (auto& b : N.buildings[st]) {
+						anyLayouts = true;
+						if (buildingKey(b.first) == key) cat[b.second >> 6] |= 1ULL << (b.second & 63);
+					}
+		}
 		if (!anyLayouts) { pos--; fail("'" + name + "' is not a structure, and this structure has no building layouts"); }
 		if (!(cat[0] | cat[1] | cat[2])) { pos--; fail("no building '" + name + "' in this structure" + buildingList(structCtx)); }
 		q.hasBuildings = 1;
