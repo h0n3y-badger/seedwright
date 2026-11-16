@@ -202,5 +202,12 @@ public final class Oracle
 		{
 			JigsawDump.dump(level, generator, randomState, state, seed, villages, Oracle::id, names);
 		}
+
+		// ---- chest loot (villages, buried treasure): -Dseedwright.oracle.loot=R ----
+		int loot = Integer.getInteger("seedwright.oracle.loot", 0);
+		if (loot > 0)
+		{
+			LootDump.dump(level, state, seed, loot, Oracle::id, names);
+		}
 	}
 }

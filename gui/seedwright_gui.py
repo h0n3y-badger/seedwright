@@ -160,11 +160,13 @@ KINDS = {
     "any": ("any of", "#c99400", True, ""),
     "not": ("none of", "#c4572f", True, ""),
     "building": ("village building", "#9a6a2e", False, ""),
+    "loot": ("chest loot", "#b07d12", False, ""),
 }
 CATEGORIES = [
     ("Structures", ["structure", "stronghold"]),
     ("Biomes", ["biome"]),
     ("Villages", ["building"]),
+    ("Chests", ["loot"]),
     ("Logic", ["all", "any", "not"]),
     ("World", ["spawn"]),
 ]
@@ -181,6 +183,12 @@ HELP = {
     "building": "Buildings in the village around it (put it inside a village block). weaponsmith = blacksmith.\n"
                 "26.3: exact (every result is re-checked with the game's terrain heights).\n"
                 "Older versions (≈): layouts use estimated terrain height, so counts are plausible, not guaranteed.",
+    "loot": "At least N of an item in the chests of the structure around it (put it inside a village or "
+            "buried_treasure block). Counted over all its chests.\n"
+            "26.3: exact, checked against the real game. A village chest that shares its chunk with an earlier "
+            "decoration (tree, hay pile...) can't be predicted and never counts, so a few real matches are missed "
+            "(about 1 chest in 7), but every result is real.\n"
+            "Older versions (≈): village layouts use estimated terrain height. Buried treasure is exact everywhere.",
 }
 
 
@@ -345,8 +353,8 @@ class Block(QFrame):
         h.addWidget(rm, 0, cols)
         h.setColumnStretch(3, 1)
         ch = self.app.queryChanged
-        if k in ("structure", "stronghold", "building"):
-            self.count = SliderEntry(1, 32 if k == "stronghold" else 16, 1, width=50)
+        if k in ("structure", "stronghold", "building", "loot"):
+            self.count = SliderEntry(1, {"stronghold": 32, "loot": 64}.get(k, 16), 1, width=50)
             self.count.valueChanged.connect(ch)
             h.addWidget(self.title("at least"), 0, 1)
             h.addWidget(self.count, 0, 2)
@@ -363,6 +371,13 @@ class Block(QFrame):
             h.addWidget(self.target, 0, 3, 1, 2)
             self.approx = self.title("≈")
             self.approx.setToolTip(HELP["building"])
+            h.addWidget(self.approx, 0, 5)
+        elif k == "loot":
+            self.target = searchable_combo(170)
+            self.target.currentTextChanged.connect(ch)
+            h.addWidget(self.target, 0, 3, 1, 2)
+            self.approx = self.title("in its chests")
+            self.approx.setToolTip(HELP["loot"])
             h.addWidget(self.approx, 0, 5)
         elif k == "biome":
             h.addWidget(self.title("biome"), 0, 1)
@@ -444,7 +459,7 @@ class Block(QFrame):
             self.setTarget(keep)
 
     def fillBuildings(self, options):
-        keep = self.targetValue() or "weaponsmith"
+        keep = self.targetValue() or ("diamond" if self.kind == "loot" else "weaponsmith")
         self.target.blockSignals(True)
         self.target.clear()
         for b in options:
@@ -486,6 +501,8 @@ class Block(QFrame):
             return f"spawn within {self.radius.value()}"
         if k == "building":
             return f"{self.count.value()} {self.targetValue()}"
+        if k == "loot":
+            return f"loot {self.count.value()} {self.targetValue()}"
         if k == "all":
             return f"all {{ {kids} }}"
         if k == "any":
@@ -521,7 +538,7 @@ class Block(QFrame):
                 self.height.setCurrentIndex(2)
                 self.y.setValue(y)
         if "name" in s and hasattr(self, "target"):
-            if self.kind == "building":
+            if self.kind in ("building", "loot"):
                 self.target.setEditText(s["name"])
                 self._pendingName = s["name"]
             else:
@@ -1042,7 +1059,7 @@ class Main(QMainWindow):
     # ---------------------------------------------------------------- names
     def loadNames(self):
         exe = engine_exe()
-        names = {"sets": [], "structs": {}, "biomes": [], "buildings": {}}
+        names = {"sets": [], "structs": {}, "biomes": [], "buildings": {}, "loot": {}}
         if exe:
             out = subprocess.run([str(exe), self.version.currentData(), "list"], capture_output=True, text=True, timeout=60).stdout
             for line in out.splitlines():
@@ -1056,10 +1073,13 @@ class Main(QMainWindow):
                     names["biomes"].append(p[1])
                 elif p[:1] == ["building"]:
                     names["buildings"].setdefault(p[1], []).append(p[2])
+                elif p[:1] == ["loot"]:
+                    names["loot"].setdefault(p[1], []).append(p[2])
         if not names["sets"]:
             QMessageBox.warning(self, "seedwright", "The engine gave no structure names. Rebuild it: cd engine && make")
         self.names = names
         self.palette.items["building"].setVisible(bool(names["buildings"]))
+        self.palette.items["loot"].setVisible(bool(names["loot"]))
         for b in self.allBlocks():
             b.fillNames(names)
         self.crack.refreshNames()
@@ -1110,6 +1130,25 @@ class Main(QMainWindow):
                     bad = "Put this inside a village block (a structure block for villages)."
                 elif not opts:
                     bad = f"'{enc.targetValue()}' has no building layouts; use a village."
+            elif b.kind == "loot":
+                enc = b.enclosingStructure()
+                opts = []
+                if enc is not None:
+                    for st in self.structuresFor(enc.targetValue()):
+                        for x in self.names["loot"].get(st, []):
+                            if x not in opts:
+                                opts.append(x)
+                pending = getattr(b, "_pendingName", None)
+                if sorted(opts) != sorted(getattr(b, "_opts", [])):
+                    b._opts = opts
+                    b.fillBuildings(sorted(opts))
+                    if pending:
+                        b.setTarget(pending)
+                b._pendingName = None
+                if enc is None:
+                    bad = "Put this inside a village or buried_treasure block."
+                elif not opts:
+                    bad = f"'{enc.targetValue()}' has no chest data; use a village or buried_treasure."
             elif b.mouth is not None and b.kind in ("all", "any", "not") and not b.mouth.blocks():
                 bad = "Empty group: drop blocks inside it."
             b.warn.setText(bad)

@@ -235,6 +235,7 @@ inline int jigsawChests(const LootTables& L, const JigsawTables& J, int st, cons
 
 struct LootHost {
 	bool ok = false;
+	bool exactLayouts = false;  // the pack has exact terrain (26.3+): village layouts, so village chests, are exact
 	std::vector<std::string> items, tables;
 	std::unique_ptr<LootTables> t;
 	int item(const std::string& name) const {
@@ -252,6 +253,12 @@ inline void loadLoot(const std::string& path, const std::vector<std::string>& st
 	while (std::getline(in, line))
 		if (line.rfind("loot 1", 0) == 0) break;
 	if (!in) return;
+	{  // exact terrain section present? (village layouts are only estimates without it: their chests would be wrong)
+		std::ifstream t(path);
+		std::string l;
+		while (std::getline(t, l))
+			if (l.rfind("terrain ", 0) == 0) H.exactLayouts = true;
+	}
 	auto L = std::make_unique<LootTables>();
 	memset(L.get(), 0, sizeof(LootTables));
 	for (auto& s : L->step) s = -1;

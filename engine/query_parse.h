@@ -289,7 +289,7 @@ private:
 			for (size_t i = 0; i < N.lootGives[st].size(); i++)
 				if (N.lootGives[st][i] && std::find(can.begin(), can.end(), N.lootItems[i]) == can.end()) can.push_back(N.lootItems[i]);
 		}
-		if (!anyLoot) { pos--; fail("no loot data for this structure (loot works in villages and buried treasure)"); }
+		if (!anyLoot) { pos--; fail("no loot data for this structure (loot works in buried treasure, and in villages on 26.3+ where their layouts are exact)"); }
 		if (!gives) {
 			std::sort(can.begin(), can.end());
 			std::string list;

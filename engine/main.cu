@@ -283,7 +283,13 @@ static QueryNames queryNames(const Pack& P) {
 		for (size_t st = 0; st < P.structures.size() && st < MAX_STRUCTS; st++) {
 			if ((int)st == L.buriedSt) addTable((int)st, L.buried);
 			int js = H.t ? H.t->structOf[st] : -1;
-			if (js < 0 || L.step[st] < 0) continue;
+			if (js < 0 || L.step[st] < 0 || !LH.exactLayouts) continue;  // estimated layouts put chests in the wrong places
+			// only what loot-verify checks against the game: villages (abandoned camps, trial chambers... unverified)
+			bool village = false;
+			for (auto& set : P.sets)
+				if (set.name == "villages")
+					for (int x : set.structs) village |= x == (int)st;
+			if (!village) continue;
 			N.lootJig[st] = 1;
 			for (int t : H.structTemplates[js])
 				for (int c = 0; c < L.tnc[t]; c++) addTable((int)st, L.c[L.tc0[t] + c].table);
@@ -808,6 +814,12 @@ int main(int argc, char** argv) {
 			std::sort(keys.begin(), keys.end());
 			for (auto& k : keys) printf("building %s %s\n", P.structures[st].name.substr(P.structures[st].name.find(':') + 1).c_str(), k.c_str());
 		}
+		// "loot STRUCTURE ITEM": items a structure's chests can hold (loot conditions)
+		for (size_t st = 0; st < N.lootGives.size(); st++)
+			for (size_t i = 0; i < N.lootGives[st].size(); i++)
+				if (N.lootGives[st][i])
+					printf("loot %s %s\n", P.structures[st].name.substr(P.structures[st].name.find(':') + 1).c_str(),
+					       N.lootItems[i].substr(N.lootItems[i].find(':') + 1).c_str());
 		return 0;
 	}
 	if (cmd == "bench") {  // single-thread per-stage cost
