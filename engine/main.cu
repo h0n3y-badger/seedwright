@@ -576,18 +576,23 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		CK(cudaMemcpy(hits.data(), dHits, sizeof(Hit) * nh, cudaMemcpyDeviceToHost));
 		std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.seed < b.seed; });
 		if (TR) {  // GPU result = estimated-terrain prefilter; exact building check on the CPU
-			prefilterHits += nh;
+			// in seed order, in chunks, stopping once --max results are in (the prefilter passes far more seeds)
 			std::vector<char> ok(nh, 0);
+			const unsigned chunk = 16 * (unsigned)omp_get_max_threads();
+			for (unsigned c0 = 0; c0 < nh && found < maxResults; c0 += chunk) {
+				unsigned c1 = std::min(nh, c0 + chunk);
+				prefilterHits += c1 - c0;
 #pragma omp parallel
-			{
-				World* w = new World();
-				std::vector<Piece> pcs;
+				{
+					World* w = new World();
+					std::vector<Piece> pcs;
 #pragma omp for schedule(dynamic, 1)
-				for (long long i = 0; i < (long long)nh; i++) ok[i] = stageBExact(P, T, q, *TR, hits[i].seed, *w, pcs, hits[i]);
-				delete w;
+					for (long long i = c0; i < (long long)c1; i++) ok[i] = stageBExact(P, T, q, *TR, hits[i].seed, *w, pcs, hits[i]);
+					delete w;
+				}
+				for (unsigned i = c0; i < c1; i++)
+					if (ok[i] && found++ < maxResults) printHit(P, hits[i]);
 			}
-			for (unsigned i = 0; i < nh; i++)
-				if (ok[i] && found++ < maxResults) printHit(P, hits[i]);
 		} else {
 			for (auto& h : hits)
 				if (found++ < maxResults) printHit(P, h);
@@ -644,7 +649,7 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		if (tested) fprintf(stderr, "\n");
 	}
 	if (!survivors) fprintf(stderr, "hint: no seed in this range can place the structures this close (counts too high or distances too small for how far apart they spawn)\n");
-	if (TR) fprintf(stderr, "buildings: %lld seeds passed the GPU prefilter (estimated terrain, slack %d), exact check kept %lld\n", prefilterHits,
+	if (TR) fprintf(stderr, "buildings: %lld seeds from the GPU prefilter (estimated terrain, slack %d) checked exactly, %lld kept\n", prefilterHits,
 	                q.buildingSlack, std::min(found, maxResults));
 	fprintf(stderr, "done: %lld full seeds tested, %lld results\n", tested, std::min(found, maxResults));
 	return 0;
