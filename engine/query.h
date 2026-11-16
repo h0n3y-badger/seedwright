@@ -17,7 +17,7 @@ enum NodeKind {
 	N_BUILDING,    // >= count buildings of a category in the enclosing village (approximate)
 };
 
-enum { MAX_NODES = 48, MAX_HITS = 32, MAX_DEPTH = 6, Y_ANY = -100000, MAX_STRONGHOLDS = 32, MAX_PIECES = 320 };
+enum { MAX_NODES = 48, MAX_HITS = 32, MAX_DEPTH = 6, Y_ANY = -100000, MAX_STRONGHOLDS = 32, MAX_PIECES = 320, MAX_BIOME_LEAVES = 4096 };
 
 struct Node {
 	int kind, count, radius, y;
@@ -25,6 +25,8 @@ struct Node {
 	uint64_t structMask;  // N_STRUCTURE: structure indices (bit i = structure i)
 	uint32_t setMask;     // sets that can produce one of those structures
 	int biome;            // N_BIOME
+	int leaf0, nleaf;     // N_BIOME: RTree leaves of that biome in Query::leaves (nleaf 0 = no list, always full search)
+	int64_t bbLo[7], bbHi[7];  // N_BIOME: union box of those leaves
 	uint64_t cat[3];      // N_BUILDING: jigsaw building categories that count (aliases: weaponsmith|weapon_smith)
 };
 
@@ -33,7 +35,35 @@ struct Query {
 	int hasBuildings;  // needs village layouts (jigsaw tables + a piece buffer)
 	int exact;  // skip the slack-based prefilter (checking given seeds: the prefilter assumes spawn within slack of 0,0)
 	Node n[MAX_NODES];
+	int nleaves;
+	uint16_t leaves[MAX_BIOME_LEAVES];
 };
+
+// Host: per N_BIOME node, the RTree leaves that carry its biome (for the exact reject in evalBiome).
+inline void prepareBiomeLeaves(Query& q, const PackDev& pk) {
+	q.nleaves = 0;
+	for (int ni = 0; ni < q.nnodes; ni++) {
+		Node& nd = q.n[ni];
+		nd.leaf0 = q.nleaves;
+		nd.nleaf = 0;
+		if (nd.kind != N_BIOME) continue;
+		int n = 0;
+		for (int i = 0; i < pk.nrnodes; i++)
+			if (pk.rnodes[i].nchild == 0 && pk.rnodes[i].biome == nd.biome) n++;
+		if (n == 0 || q.nleaves + n > MAX_BIOME_LEAVES || pk.nrnodes > 65536) continue;  // no list: full search
+		for (int k = 0; k < 7; k++) nd.bbLo[k] = INT64_MAX, nd.bbHi[k] = INT64_MIN;
+		for (int i = 0; i < pk.nrnodes; i++) {
+			const RNode& r = pk.rnodes[i];
+			if (r.nchild != 0 || r.biome != nd.biome) continue;
+			q.leaves[q.nleaves++] = (uint16_t)i;
+			for (int k = 0; k < 7; k++) {
+				nd.bbLo[k] = r.lo[k] < nd.bbLo[k] ? r.lo[k] : nd.bbLo[k];
+				nd.bbHi[k] = r.hi[k] > nd.bbHi[k] ? r.hi[k] : nd.bbHi[k];
+			}
+		}
+		nd.nleaf = n;
+	}
+}
 
 struct Hit {
 	int64_t seed;
@@ -133,22 +163,52 @@ HDN bool evalStructure(EvalCtx& c, const Node& nd, int ni, int ax, int az, int s
 	return n >= nd.count;
 }
 
+// Is the biome at climate t the node's biome? Exact: the RTree search returns a leaf of globally minimal
+// distance, so when some leaf W (the previous sample's result) is strictly closer than every leaf of the
+// wanted biome, the result can't be of that biome, whatever the search's tie-breaking. Otherwise (or
+// without a leaf list) the full vanilla search decides. wit: in/out previous full-search result.
+HDN bool biomeIs(const PackDev& pk, const Query& q, const Node& nd, const int64_t* t, int& wit) {
+	if (nd.nleaf > 0 && wit >= 0 && pk.rnodes[wit].biome != nd.biome) {
+		int64_t dW = nodeDist(pk.rnodes[wit], t), lb = 0;
+		for (int k = 0; k < 7; k++) {
+			int64_t d = pdist(nd.bbLo[k], nd.bbHi[k], t[k]);
+			lb += d * d;
+		}
+		if (lb > dW) return false;
+		if (nd.nleaf <= 128) {  // per-leaf check; for big biomes (plains, desert) the full search is cheaper
+			bool reach = false;
+			for (int i = 0; i < nd.nleaf && !reach; i++) reach = nodeDist(pk.rnodes[q.leaves[nd.leaf0 + i]], t) <= dW;
+			if (!reach) return false;
+		}
+	}
+	wit = rtreeSearch(pk, 0, t, -1);
+	return pk.rnodes[wit].biome == nd.biome;
+}
+
 HDN bool evalBiome(EvalCtx& c, const Node& nd, int ax, int az, int depth) {
-	// on a 16-block grid, nearest rings first; y=any tries the cave levels (y -48..48, every 16)
+	// on a 16-block grid, nearest rings first; y=any tries the cave levels (y -48..48, every 16).
+	// Same samples and order as biomeAt(..., 0); y-independent climate ops are evaluated once per column.
 	int64_t R2 = (int64_t)nd.radius * nd.radius;
 	int steps = nd.radius / 16;
 	int y0 = nd.y == Y_ANY ? -48 : nd.y, y1 = nd.y == Y_ANY ? 48 : nd.y;
+	const PackDev& pk = *c.pk;
+	int upto = climateUpto(pk), wit = -1;
+	double pv[MAX_OPS], vv[MAX_OPS];
 	for (int r = 0; r <= steps; r++)
 		for (int dz = -r; dz <= r; dz++)
-			for (int dx = -r; dx <= r; dx++) {
-				if (dx != -r && dx != r && dz != -r && dz != r) continue;
+			for (int dx = -r; dx <= r; dx += (dz == -r || dz == r) ? 1 : 2 * r) {  // ring cells only
 				int bx = ax + dx * 16, bz = az + dz * 16;
 				if (dist2(bx, bz, ax, az) > R2) continue;
-				for (int y = y0; y <= y1; y += 16)
-					if (biomeAt(*c.w, *c.pk, bx >> 2, y >> 2, bz >> 2, 0) == nd.biome) {
+				for (int y = y0; y <= y1; y += 16) {
+					evalOpsState(*c.w, pk, (bx >> 2) << 2, (y >> 2) << 2, (bz >> 2) << 2, false, false, upto, pv, vv, y != y0);
+					int64_t t[7];
+					for (int i = 0; i < 6; i++) t[i] = quantize((float)pv[pk.climate[i]]);
+					t[6] = 0;
+					if (biomeIs(pk, *c.q, nd, t, wit)) {
 						addHit(c, -1 - nd.biome, bx, bz, depth);
 						return true;
 					}
+				}
 			}
 	return false;
 }
