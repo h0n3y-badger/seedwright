@@ -245,10 +245,13 @@ static Query parseQuery(const Pack& P, const StructTables& T, std::vector<std::s
 			size_t colon = head.find(':');
 			c.count = colon == std::string::npos ? 1 : std::stoi(head.substr(colon + 1));
 			std::string name = head.substr(0, colon);
+			bool exact = !name.empty() && name[0] == '=';  // "=NAME": that one structure, no set/substring match
+			if (exact) name = name.substr(1);
 			for (int si = 0; si < T.nsets; si++) {
-				bool setMatch = P.sets[si].name == name || P.sets[si].name == name + "s";
+				bool setMatch = !exact && (P.sets[si].name == name || P.sets[si].name == name + "s");
 				for (int st : P.sets[si].structs)
-					if (setMatch || nameMatches(P.structures[st].name, name)) {
+					if (setMatch || (exact ? P.structures[st].name.substr(P.structures[st].name.find(':') + 1) == name
+					                       : nameMatches(P.structures[st].name, name))) {
 						c.structMask |= 1ULL << st;
 						c.setMask |= 1u << si;
 					}
@@ -362,7 +365,7 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 		tested += 65536;
 	}
 	double t2 = now();
-	fprintf(stderr, "stage B: %lld full seeds in %.2fs (%.0f seeds/s), %lld results\n", tested, t2 - t1, tested / std::max(1e-9, t2 - t1), (long long)found);
+	fprintf(stderr, "stage B: %lld full seeds in %.2fs (%.0f seeds/s), %lld results\n", tested, t2 - t1, tested / std::max(1e-9, t2 - t1), std::min((long long)found, maxResults));
 	return 0;
 }
 
@@ -473,7 +476,7 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 			CK(cudaDeviceSynchronize());
 			tB += now() - tb;
 			tested += hseeds.size();
-			fprintf(stderr, "\rstage B: %lld full seeds, %.0f seeds/s, %lld results   ", tested, tested / std::max(tB, 1e-9), found);
+			fprintf(stderr, "\rstage B: %lld full seeds, %.0f seeds/s, %lld results   ", tested, tested / std::max(tB, 1e-9), std::min(found, maxResults));
 		}
 		t0 = now();
 	}
@@ -484,13 +487,21 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 
 int main(int argc, char** argv) {
 	if (argc < 3) {
-		fprintf(stderr, "usage: seedwright <pack> verify <oracle files...>\n       seedwright <pack> search ...\n");
+		fprintf(stderr, "usage: seedwright <pack> verify <oracle files...>\n       seedwright <pack> search ...\n       seedwright <pack> list\n");
 		return 2;
 	}
 	Pack P = loadPack(argv[1]);
 	StructTables T = buildTables(P);
 	std::string cmd = argv[2];
 	if (cmd == "verify") return verify(P, T, std::vector<std::string>(argv + 3, argv + argc));
+	if (cmd == "list") {  // machine-readable names for front ends: "set NAME", "structure SET NAME", "biome NAME"
+		for (auto& s : P.sets) {
+			printf("set %s\n", s.name.c_str());
+			for (int st : s.structs) printf("structure %s %s\n", s.name.c_str(), P.structures[st].name.substr(P.structures[st].name.find(':') + 1).c_str());
+		}
+		for (auto& b : P.biomes) printf("biome %s\n", b.substr(b.find(':') + 1).c_str());
+		return 0;
+	}
 	if (cmd == "bench") {  // single-thread per-stage cost
 		const PackDev& pk = *P.dev;
 		World* w = new World();

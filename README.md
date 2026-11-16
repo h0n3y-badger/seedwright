@@ -50,6 +50,11 @@ Filters: `--need NAME:COUNT@RADIUS` (structure or set name, substring ok: `villa
 (`--origin` for 0,0). Options: `--start/--count` (low-48 range), `--max N`, `--slack B` (how far spawn may
 be from 0,0 for the structure pre-filter, default 256), `--cpu`.
 
+GUI (PySide6): `python3 gui/seedwright_gui.py`. It runs the same CLI: each condition row is a
+`--need`/`--biome`/`--stronghold`/`--spawn-within`, with a slider and an editable entry for count and radius, and
+the exact command line is shown before it runs. `seedwright <pack> list` gives it the structure/biome names;
+`--need =NAME` picks one structure exactly (no set or substring matching).
+
 Pipeline: stage A tests only the low 48 bits (structure placement is pure LCG) at ~5.7 G seeds/s on an
 RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome/spawn checks
 (~185 k seeds/s on 26.3, ~60 k on legacy versions; CPU about 1/3 of that on 16 threads).
