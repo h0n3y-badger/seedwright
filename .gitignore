@@ -1,0 +1,7 @@
+oracle/.gradle/
+oracle/build/
+oracle/run/
+oracle/run-server-*.log
+engine/seedwright-cpu
+engine/seedwright-gpu
+data/

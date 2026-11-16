@@ -1,0 +1,168 @@
+// Structure placement + biome validation (device-capable tables built from the host Pack).
+#pragma once
+#include "sw_core.h"
+
+namespace sw {
+
+enum { MAX_SETS = 32, MAX_STRUCTS = 64, MAX_SET_STRUCTS = 32 };
+enum SetType : uint8_t { SET_SPREAD, SET_RINGS, SET_OTHER };
+
+struct SetDev {
+	uint8_t type;
+	Spread spread;
+	int exclusion, exclusionChunks;
+	int nstructs, structs[MAX_SET_STRUCTS], weights[MAX_SET_STRUCTS];
+	// concentric rings
+	int distance, ringSpread, count;
+	uint64_t preferred[2];
+};
+
+enum { CHECK_CENTER, CHECK_FIXED_Y, CHECK_MINESHAFT };
+struct StructDev {
+	uint64_t biomes[2];
+	int jigsaw, check, y;
+};
+
+struct StructTables {
+	int nsets, nstructs;
+	SetDev sets[MAX_SETS];
+	StructDev st[MAX_STRUCTS];
+};
+
+HD bool maskHas(const uint64_t* m, int b) { return b >= 0 && ((m[b >> 6] >> (b & 63)) & 1); }
+
+// StructurePlacement.isStructureChunk for random_spread sets (placement + frequency + exclusion zone)
+HDN bool isStructureChunk(const StructTables& T, int set, uint64_t seed, int cx, int cz) {
+	const SetDev& s = T.sets[set];
+	if (s.type != SET_SPREAD) return false;
+	if (!isSpreadChunk(s.spread, seed, cx, cz)) return false;
+	if (s.exclusion >= 0) {
+		const SetDev& o = T.sets[s.exclusion];
+		int r = s.exclusionChunks;
+		// only regions that can hold a candidate in range need checking
+		int rx0 = floorDiv(cx - r, o.spread.spacing), rx1 = floorDiv(cx + r, o.spread.spacing);
+		int rz0 = floorDiv(cz - r, o.spread.spacing), rz1 = floorDiv(cz + r, o.spread.spacing);
+		for (int rx = rx0; rx <= rx1; rx++)
+			for (int rz = rz0; rz <= rz1; rz++) {
+				int px, pz;
+				spreadCandidate(o.spread, seed, rx, rz, px, pz);
+				if (px >= cx - r && px <= cx + r && pz >= cz - r && pz <= cz + r && frequencyOk(o.spread, seed, px, pz)) return false;
+			}
+	}
+	return true;
+}
+
+// Column-volume climate for one quart column (couldStructureExistInColumn). y-independent ops are
+// shared, so this evaluates the program once per y only for the ops downstream of the y gradient.
+struct Column {
+	int qminY, qmaxY;
+	int biome[100];
+	float depth[100];
+};
+
+HDN void columnBiomes(const World& w, const PackDev& pk, int qx, int qz, Column& col) {
+	col.qminY = (pk.minY - 1) >> 2;
+	col.qmaxY = (pk.minY + pk.height - 1) >> 2;
+	float v[MAX_OPS];
+	int upto = climateUpto(pk);
+	for (int qy = col.qminY; qy <= col.qmaxY; qy++) {
+		evalOps(w, pk, qx << 2, qy << 2, qz << 2, true, false, upto, v);
+		float c6[6];
+		for (int i = 0; i < 6; i++) c6[i] = v[pk.climate[i]];
+		col.biome[qy - col.qminY] = biomeFromClimate(pk, c6);
+		col.depth[qy - col.qminY] = c6[4];
+	}
+}
+
+// Biome validity of a structure start at chunk (cx,cz): column pre-check at the chunk middle (exact
+// vanilla volume semantics), then the start-position check at an estimated surface height (highest
+// quart with depth >= 0; vanilla uses the real terrain height there -> approximate until terrain lands).
+HDN bool structureBiomeOk(const World& w, const PackDev& pk, const StructTables& T, int st, int cx, int cz) {
+	const StructDev& S = T.st[st];
+	if (S.check == CHECK_FIXED_Y)  // jigsaw with an absolute start height and no heightmap projection
+		return maskHas(S.biomes, biomeAt(w, pk, ((cx << 4) + 8) >> 2, S.y >> 2, ((cz << 4) + 8) >> 2, 0));
+	if (S.check == CHECK_MINESHAFT)  // (middleX, 50 + yOffset, minZ), no column pre-check
+		return maskHas(S.biomes, biomeAt(w, pk, ((cx << 4) + 8) >> 2, S.y >> 2, (cz << 4) >> 2, 0));
+	int qx = ((cx << 4) + 8) >> 2, qz = ((cz << 4) + 8) >> 2;
+	Column col;
+	columnBiomes(w, pk, qx, qz, col);
+	bool any = false;
+	for (int qy = col.qminY; qy <= col.qmaxY; qy++) any |= maskHas(S.biomes, col.biome[qy - col.qminY]);
+	if (!any) return false;
+	int surf = col.qminY;
+	for (int qy = col.qmaxY; qy >= col.qminY; qy--)
+		if (col.depth[qy - col.qminY] >= 0.0f) {
+			surf = qy;
+			break;
+		}
+	return maskHas(S.biomes, biomeAt(w, pk, qx, surf, qz, 2));
+}
+
+// Which structure of a set generates at a placement chunk (-1 = none): vanilla's weighted retry loop.
+HDN int structureAt(const World& w, const PackDev& pk, const StructTables& T, int set, int cx, int cz) {
+	const SetDev& s = T.sets[set];
+	if (s.nstructs == 1) return structureBiomeOk(w, pk, T, s.structs[0], cx, cz) ? s.structs[0] : -1;
+	JavaRandom r;
+	largeFeatureRandom(r, (uint64_t)w.seed, cx, cz);
+	int alive[MAX_SET_STRUCTS], n = s.nstructs, total = 0;
+	for (int i = 0; i < n; i++) {
+		alive[i] = i;
+		total += s.weights[i];
+	}
+	while (n > 0) {
+		int choice = r.nextInt(total), idx = 0;
+		for (; idx < n; idx++) {
+			choice -= s.weights[alive[idx]];
+			if (choice < 0) break;
+		}
+		int pick = alive[idx];
+		if (structureBiomeOk(w, pk, T, s.structs[pick], cx, cz)) return s.structs[pick];
+		total -= s.weights[pick];
+		for (int j = idx; j < n - 1; j++) alive[j] = alive[j + 1];
+		n--;
+	}
+	return -1;
+}
+
+// ---- strongholds (ConcentricRingsStructurePlacement via ChunkGeneratorStructureState) ----
+// Computes the first `want` ring positions (each is independent of the later ones).
+HDN int strongholds(const World& w, const PackDev& pk, const SetDev& s, int want, int* outX, int* outZ) {
+	JavaRandom rnd;
+	rnd.setSeed((uint64_t)w.seed);
+	double angle = rnd.nextDouble() * 3.141592653589793 * 2.0;
+	int pos = 0, circle = 0, spread = s.ringSpread, n = 0;
+	for (int i = 0; i < s.count && n < want; i++) {
+		double dist = (double)(4 * s.distance + s.distance * circle * 6) + (rnd.nextDouble() - 0.5) * (double)(s.distance * 2.5);
+		int ix = (int)(int64_t)floor(cos(angle) * dist + 0.5), iz = (int)(int64_t)floor(sin(angle) * dist + 0.5);  // Math.round
+		JavaRandom search;
+		search.setSeed((uint64_t)rnd.nextLong());  // random.fork()
+		// findBiomeHorizontal(sectionToBlock(ix,8), 0, sectionToBlock(iz,8), 112, preferred, search)
+		int cxq = ((ix << 4) + 8) >> 2, czq = ((iz << 4) + 8) >> 2, R = 112 >> 2;
+		int found = 0, rx = 0, rz = 0;
+		for (int dz = -R; dz <= R; dz++)
+			for (int dx = -R; dx <= R; dx++) {
+				int b = biomeAt(w, pk, cxq + dx, 0, czq + dz, 0);
+				if (maskHas(s.preferred, b)) {
+					if (found == 0 || search.nextInt(found + 1) == 0) {
+						rx = (cxq + dx) << 2;
+						rz = (czq + dz) << 2;
+					}
+					found++;
+				}
+			}
+		outX[n] = found ? rx >> 4 : ix;
+		outZ[n] = found ? rz >> 4 : iz;
+		n++;
+		angle += 6.283185307179586 / spread;
+		if (++pos == spread) {
+			circle++;
+			pos = 0;
+			spread += 2 * spread / (circle + 1);
+			spread = spread < s.count - i ? spread : s.count - i;
+			angle += rnd.nextDouble() * 3.141592653589793 * 2.0;
+		}
+	}
+	return n;
+}
+
+}  // namespace sw

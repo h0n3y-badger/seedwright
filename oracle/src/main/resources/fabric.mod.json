@@ -1,0 +1,11 @@
+{
+	"schemaVersion": 1,
+	"id": "seedwright_oracle",
+	"version": "${version}",
+	"name": "Seedwright Oracle",
+	"description": "Dev-only: dumps vanilla worldgen ground truth for the seedwright seed finder.",
+	"license": "AGPL-3.0-only",
+	"environment": "*",
+	"mixins": ["seedwright_oracle.mixins.json"],
+	"depends": { "fabricloader": ">=0.19.5", "minecraft": "26.3.x" }
+}
