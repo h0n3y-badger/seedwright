@@ -103,7 +103,7 @@ enum OpCode : uint8_t {
 };
 
 struct Op {
-	uint8_t code, cached, unshifted;
+	uint8_t code, cached, unshifted, ydep;
 	int16_t a, b, c;
 	float f0, f1;
 	double d0, d1;
@@ -294,14 +294,15 @@ HDN float splineEval(const PackDev& pk, int s, const float* vals) {
 // Evaluates ops [0, upto] at a block position. vol=true: DensityVolume semantics for every op.
 // colHit=true (point mode): cached ops take their volume value (a point query landing inside a
 // column volume a cache cell still holds, as in Structure.GenerationContext).
-HDN void evalOps(const World& w, const PackDev& pk, int bx, int by, int bz, bool vol, bool colHit, int upto, float* out) {
-	float pv[MAX_OPS], vv[MAX_OPS];
+HDN void evalOpsState(const World& w, const PackDev& pk, int bx, int by, int bz, bool vol, bool colHit, int upto, float* pv, float* vv,
+                      bool ydepOnly) {
 	bool needV = vol || colHit;
-	for (int pass = needV ? 0 : 1; pass < 2; pass++) {
+	for (int pass = needV ? 0 : 1; pass < (vol ? 1 : 2); pass++) {
 		bool V = pass == 0;  // pass 0: volume values, pass 1: point values
 		float* R = V ? vv : pv;
 		for (int i = 0; i <= upto; i++) {
 			const Op& o = pk.ops[i];
+			if (ydepOnly && !o.ydep) continue;
 			if (!V && colHit && o.cached) {
 				pv[i] = vv[i];
 				continue;
@@ -351,6 +352,11 @@ HDN void evalOps(const World& w, const PackDev& pk, int bx, int by, int bz, bool
 			R[i] = r;
 		}
 	}
+}
+
+HDN void evalOps(const World& w, const PackDev& pk, int bx, int by, int bz, bool vol, bool colHit, int upto, float* out) {
+	float pv[MAX_OPS], vv[MAX_OPS];
+	evalOpsState(w, pk, bx, by, bz, vol, colHit, upto, pv, vv, false);
 	float* src = vol ? vv : pv;
 	for (int i = 0; i <= upto; i++) out[i] = src[i];
 }
@@ -393,12 +399,14 @@ HDN int rtreeSearch(const PackDev& pk, int node, const int64_t* t, int cand) {
 	return best;
 }
 
-HD int biomeFromClimate(const PackDev& pk, const float* c6) {
+// cand = leaf node index to start from (vanilla's RTree.lastResult), -1 = none. Returns the leaf.
+HD int leafFromClimate(const PackDev& pk, const float* c6, int cand) {
 	int64_t t[7];
 	for (int i = 0; i < 6; i++) t[i] = quantize(c6[i]);
 	t[6] = 0;
-	return pk.rnodes[rtreeSearch(pk, 0, t, -1)].biome;
+	return rtreeSearch(pk, 0, t, cand);
 }
+HD int biomeFromClimate(const PackDev& pk, const float* c6) { return pk.rnodes[leafFromClimate(pk, c6, -1)].biome; }
 
 HD int climateUpto(const PackDev& pk) {
 	int m = 0;
@@ -451,7 +459,8 @@ HD void spawnOrigin(const World& w, const PackDev& pk, int& outX, int& outZ) {
 		while (radius <= maxR) {
 			int x = ox + (int)(sin((double)angle) * radius);
 			int z = oz + (int)(cos((double)angle) * radius);
-			int64_t f = spawnFitness(w, pk, x, z);
+			// fitness = climate*2048^2 + x^2+z^2 >= x^2+z^2: a candidate that far out can't win (exact pruning)
+			int64_t f = ((int64_t)x * x + (int64_t)z * z >= best) ? INT64_MAX : spawnFitness(w, pk, x, z);
 			if (f < best) {
 				best = f;
 				bx = x;

@@ -1,10 +1,13 @@
 // seedwright CLI. Builds as CUDA (nvcc) or CPU-only (g++ -x c++ -DSW_CPU_ONLY).
 #include "pack.h"
 #include "structures.h"
+#include "query.h"
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <set>
+#include <atomic>
+#include <mutex>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -198,6 +201,277 @@ static int verify(const Pack& P, const StructTables& T, const std::vector<std::s
 	return bad ? 1 : 0;
 }
 
+
+// ------------------------------------------------------------------ search
+
+static bool nameMatches(const std::string& full, const std::string& want) {
+	std::string a = full.substr(full.find(':') + 1);
+	return a == want || a.find(want) != std::string::npos;
+}
+
+static Query parseQuery(const Pack& P, const StructTables& T, std::vector<std::string>& args, std::map<std::string, std::string>& opt) {
+	Query q;
+	memset(&q, 0, sizeof q);
+	q.anchorSpawn = 1;
+	q.slack = 256;
+	for (size_t i = 0; i < args.size(); i++) {
+		std::string a = args[i];
+		auto val = [&]() {
+			if (i + 1 >= args.size()) throw std::runtime_error("missing value for " + a);
+			return args[++i];
+		};
+		auto at = [](const std::string& v, std::string& head, int& r) {
+			size_t p = v.find('@');
+			if (p == std::string::npos) throw std::runtime_error("expected NAME@RADIUS in " + v);
+			head = v.substr(0, p);
+			r = std::stoi(v.substr(p + 1));
+		};
+		if (q.ncond >= MAX_CONDS && (a == "--need" || a == "--biome" || a == "--stronghold" || a == "--spawn-within")) throw std::runtime_error("too many conditions");
+		if (a == "--need") {
+			Cond& c = q.c[q.ncond++];
+			std::string head;
+			at(val(), head, c.radius);
+			c.kind = COND_STRUCTURE;
+			size_t colon = head.find(':');
+			c.count = colon == std::string::npos ? 1 : std::stoi(head.substr(colon + 1));
+			std::string name = head.substr(0, colon);
+			for (int si = 0; si < T.nsets; si++) {
+				bool setMatch = P.sets[si].name == name || P.sets[si].name == name + "s";
+				for (int st : P.sets[si].structs)
+					if (setMatch || nameMatches(P.structures[st].name, name)) {
+						c.structMask |= 1ULL << st;
+						c.setMask |= 1u << si;
+					}
+			}
+			if (!c.structMask) throw std::runtime_error("no structure matches '" + name + "'");
+		} else if (a == "--biome") {
+			Cond& c = q.c[q.ncond++];
+			std::string head;
+			at(val(), head, c.radius);
+			c.kind = COND_BIOME;
+			c.biome = P.biome(head);
+			if (c.biome < 0) throw std::runtime_error("unknown biome " + head);
+		} else if (a == "--stronghold") {
+			Cond& c = q.c[q.ncond++];
+			std::string head;
+			at(val(), head, c.radius);
+			c.kind = COND_STRONGHOLD;
+			c.count = head.empty() ? 1 : std::stoi(head);
+		} else if (a == "--spawn-within") {
+			Cond& c = q.c[q.ncond++];
+			c.kind = COND_SPAWN;
+			c.radius = std::stoi(val());
+		} else if (a == "--origin") {
+			q.anchorSpawn = 0;
+		} else if (a == "--slack") {
+			q.slack = std::stoi(val());
+		} else if (a.rfind("--", 0) == 0) {
+			opt[a.substr(2)] = (i + 1 < args.size() && args[i + 1].rfind("--", 0) != 0) ? val() : "1";
+		} else {
+			throw std::runtime_error("unexpected argument " + a);
+		}
+	}
+	return q;
+}
+
+static void printHit(const Pack& P, const Hit& h) {
+	printf("%lld  spawn %d %d ", (long long)h.seed, h.spawnX, h.spawnZ);
+	for (int i = 0; i < h.n; i++) {
+		std::string what = h.what[i] >= 0 ? P.structures[h.what[i]].name.substr(10)
+		                 : h.what[i] == -1000 ? "stronghold" : P.biomes[-1 - h.what[i]].substr(10);
+		printf(" | %s %d %d", what.c_str(), h.x[i], h.z[i]);
+	}
+	printf("\n");
+	fflush(stdout);
+}
+
+static std::vector<int64_t> parseSeeds(const std::string& s) {
+	std::vector<int64_t> v;
+	std::stringstream ss(s);
+	std::string t;
+	while (std::getline(ss, t, ',')) v.push_back(std::stoll(t));
+	return v;
+}
+
+static double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt) {
+	const PackDev& pk = *P.dev;
+	long long maxResults = opt.count("max") ? std::stoll(opt["max"]) : 20;
+	std::atomic<long long> found{0};
+	if (opt.count("seeds")) {
+		for (int64_t s : parseSeeds(opt["seeds"])) {
+			auto* w = new World();
+			worldInit(*w, pk, s);
+			Hit h;
+			bool ok = stageA(T, q, (uint64_t)s) && stageB(*w, pk, T, q, h);
+			if (ok) printHit(P, h);
+			else printf("%lld  no match\n", (long long)s);
+			delete w;
+		}
+		return 0;
+	}
+	uint64_t start = opt.count("start") ? std::stoull(opt["start"]) : 0;
+	uint64_t count = opt.count("count") ? std::stoull(opt["count"]) : (1ULL << 24);
+	double t0 = now();
+	std::vector<uint64_t> lows;
+	std::mutex mu;
+#pragma omp parallel
+	{
+		std::vector<uint64_t> mine;
+#pragma omp for schedule(dynamic, 65536)
+		for (long long i = 0; i < (long long)count; i++) {
+			uint64_t lo = (start + i) & 0xFFFFFFFFFFFFULL;
+			if (stageA(T, q, lo)) mine.push_back(lo);
+		}
+		std::lock_guard<std::mutex> g(mu);
+		lows.insert(lows.end(), mine.begin(), mine.end());
+	}
+	std::sort(lows.begin(), lows.end());
+	double t1 = now();
+	fprintf(stderr, "stage A: %llu low-48 seeds in %.2fs (%.1f M/s), %zu survivors\n", (unsigned long long)count, t1 - t0, count / (t1 - t0) / 1e6, lows.size());
+	long long tested = 0;
+	for (uint64_t lo : lows) {
+		if (found >= maxResults) break;
+#pragma omp parallel
+		{
+			World* w = new World();
+#pragma omp for schedule(dynamic, 64)
+			for (int hi = 0; hi < 65536; hi++) {
+				if (found >= maxResults) continue;
+				int64_t s = (int64_t)(((uint64_t)hi << 48) | lo);
+				worldInit(*w, pk, s);
+				Hit h;
+				if (stageB(*w, pk, T, q, h) && found++ < maxResults) {
+					std::lock_guard<std::mutex> g(mu);
+					printHit(P, h);
+				}
+			}
+			delete w;
+		}
+		tested += 65536;
+	}
+	double t2 = now();
+	fprintf(stderr, "stage B: %lld full seeds in %.2fs (%.0f seeds/s), %lld results\n", tested, t2 - t1, tested / std::max(1e-9, t2 - t1), (long long)found);
+	return 0;
+}
+
+#ifndef SW_CPU_ONLY
+#define CK(x) do { cudaError_t e = (x); if (e != cudaSuccess) { fprintf(stderr, "CUDA %s at %s:%d\n", cudaGetErrorString(e), __FILE__, __LINE__); exit(1); } } while (0)
+
+__global__ void kStageA(const StructTables* T, const Query* q, uint64_t start, uint64_t count, uint64_t* out, unsigned* nout, unsigned cap) {
+	for (uint64_t i = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x; i < count; i += (uint64_t)gridDim.x * blockDim.x) {
+		uint64_t lo = (start + i) & 0xFFFFFFFFFFFFULL;
+		if (stageA(*T, *q, lo)) {
+			unsigned k = atomicAdd(nout, 1u);
+			if (k < cap) out[k] = lo;
+		}
+	}
+}
+
+__global__ void kStageB(const PackDev* pk, const StructTables* T, const Query* q, const int64_t* seeds, unsigned n, World* worlds, Hit* hits, unsigned* nhits, unsigned cap) {
+	World& w = worlds[blockIdx.x * blockDim.x + threadIdx.x];
+	for (unsigned i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {
+		worldInit(w, *pk, seeds[i]);
+		Hit h;
+		if (stageB(w, *pk, *T, *q, h)) {
+			unsigned k = atomicAdd(nhits, 1u);
+			if (k < cap) hits[k] = h;
+		}
+	}
+}
+
+static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt) {
+	long long maxResults = opt.count("max") ? std::stoll(opt["max"]) : 20;
+	CK(cudaDeviceSetLimit(cudaLimitStackSize, 16384));
+	PackDev* dPk;
+	StructTables* dT;
+	Query* dQ;
+	CK(cudaMalloc(&dPk, sizeof(PackDev)));
+	CK(cudaMalloc(&dT, sizeof(StructTables)));
+	CK(cudaMalloc(&dQ, sizeof(Query)));
+	CK(cudaMemcpy(dPk, P.dev.get(), sizeof(PackDev), cudaMemcpyHostToDevice));
+	CK(cudaMemcpy(dT, &T, sizeof T, cudaMemcpyHostToDevice));
+	CK(cudaMemcpy(dQ, &q, sizeof q, cudaMemcpyHostToDevice));
+	int sms;
+	CK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0));
+	const int tpb = 128, blocksB = sms * 4;
+	const unsigned nWorlds = blocksB * tpb;
+	World* dW;
+	CK(cudaMalloc(&dW, sizeof(World) * nWorlds));
+	const unsigned capA = 1u << 22, capH = 4096;
+	uint64_t* dLows;
+	unsigned *dN, *dNH;
+	Hit* dHits;
+	CK(cudaMalloc(&dLows, sizeof(uint64_t) * capA));
+	CK(cudaMalloc(&dN, 4));
+	CK(cudaMalloc(&dNH, 4));
+	CK(cudaMalloc(&dHits, sizeof(Hit) * capH));
+	int64_t* dSeeds;
+	const unsigned batch = 1u << 18;
+	CK(cudaMalloc(&dSeeds, sizeof(int64_t) * batch));
+	std::vector<int64_t> hseeds;
+	long long found = 0;
+	auto runB = [&](const std::vector<int64_t>& seeds) {
+		for (size_t off = 0; off < seeds.size() && found < maxResults; off += batch) {
+			unsigned n = (unsigned)std::min<size_t>(batch, seeds.size() - off);
+			CK(cudaMemcpy(dSeeds, seeds.data() + off, sizeof(int64_t) * n, cudaMemcpyHostToDevice));
+			CK(cudaMemset(dNH, 0, 4));
+			kStageB<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dHits, dNH, capH);
+			CK(cudaGetLastError());
+			unsigned nh;
+			CK(cudaMemcpy(&nh, dNH, 4, cudaMemcpyDeviceToHost));
+			nh = std::min(nh, capH);
+			std::vector<Hit> hits(nh);
+			CK(cudaMemcpy(hits.data(), dHits, sizeof(Hit) * nh, cudaMemcpyDeviceToHost));
+			std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.seed < b.seed; });
+			for (auto& h : hits)
+				if (found++ < maxResults) printHit(P, h);
+		}
+	};
+	if (opt.count("seeds")) {
+		auto v = parseSeeds(opt["seeds"]);
+		runB(v);
+		return 0;
+	}
+	uint64_t start = opt.count("start") ? std::stoull(opt["start"]) : 0;
+	uint64_t count = opt.count("count") ? std::stoull(opt["count"]) : (1ULL << 32);
+	double t0 = now();
+	const uint64_t chunkA = 1ULL << 32;
+	double tB = 0;
+	long long tested = 0;
+	for (uint64_t off = 0; off < count && found < maxResults; off += chunkA) {
+		uint64_t n = std::min(chunkA, count - off);
+		CK(cudaMemset(dN, 0, 4));
+		kStageA<<<sms * 16, 256>>>(dT, dQ, start + off, n, dLows, dN, capA);
+		CK(cudaGetLastError());
+		unsigned nl;
+		CK(cudaMemcpy(&nl, dN, 4, cudaMemcpyDeviceToHost));
+		if (nl > capA) fprintf(stderr, "warning: %u stage-A survivors, keeping %u (narrow the query)\n", nl, capA);
+		nl = std::min(nl, capA);
+		std::vector<uint64_t> lows(nl);
+		CK(cudaMemcpy(lows.data(), dLows, 8ull * nl, cudaMemcpyDeviceToHost));
+		std::sort(lows.begin(), lows.end());
+		double t1 = now();
+		fprintf(stderr, "stage A: %llu low-48 seeds in %.2fs (%.0f M/s), %u survivors\n", (unsigned long long)n, t1 - t0, n / (t1 - t0) / 1e6, nl);
+		for (size_t i = 0; i < lows.size() && found < maxResults;) {
+			hseeds.clear();
+			for (; i < lows.size() && hseeds.size() + 65536 <= batch; i++)
+				for (int hi = 0; hi < 65536; hi++) hseeds.push_back((int64_t)(((uint64_t)hi << 48) | lows[i]));
+			double tb = now();
+			runB(hseeds);
+			CK(cudaDeviceSynchronize());
+			tB += now() - tb;
+			tested += hseeds.size();
+			fprintf(stderr, "\rstage B: %lld full seeds, %.0f seeds/s, %lld results   ", tested, tested / std::max(tB, 1e-9), found);
+		}
+		t0 = now();
+	}
+	fprintf(stderr, "\n");
+	return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
 	if (argc < 3) {
 		fprintf(stderr, "usage: seedwright <pack> verify <oracle files...>\n       seedwright <pack> search ...\n");
@@ -207,6 +481,52 @@ int main(int argc, char** argv) {
 	StructTables T = buildTables(P);
 	std::string cmd = argv[2];
 	if (cmd == "verify") return verify(P, T, std::vector<std::string>(argv + 3, argv + argc));
+	if (cmd == "bench") {  // single-thread per-stage cost
+		const PackDev& pk = *P.dev;
+		World* w = new World();
+		int N = argc > 3 ? atoi(argv[3]) : 300;
+		int vil = setIndex(P, "villages");
+		double t0 = now(), tInit = 0, tSpawn = 0, tStruct = 0, tBiome = 0;
+		long long nStruct = 0, sink = 0;
+		for (int i = 0; i < N; i++) {
+			int64_t seed = (int64_t)mixStafford13(i + 1);
+			double a = now();
+			worldInit(*w, pk, seed);
+			double b = now();
+			int sx, sz;
+			spawnOrigin(*w, pk, sx, sz);
+			double c = now();
+			for (int rx = -1; rx <= 0; rx++)
+				for (int rz = -1; rz <= 0; rz++) {
+					int px, pz;
+					spreadCandidate(T.sets[vil].spread, (uint64_t)seed, rx, rz, px, pz);
+					sink += structureAt(*w, pk, T, vil, px, pz);
+					nStruct++;
+				}
+			double d = now();
+			for (int k = 0; k < 64; k++) sink += biomeAt(*w, pk, k * 37, 16, k * 11, 0);
+			double e = now();
+			tInit += b - a; tSpawn += c - b; tStruct += d - c; tBiome += e - d;
+		}
+		printf("per seed: init %.1f us, spawn %.1f us, village structureAt %.1f us each, biomeAt %.2f us each (sink %lld, total %.2fs)\n",
+		       tInit / N * 1e6, tSpawn / N * 1e6, tStruct / nStruct * 1e6, tBiome / N / 64 * 1e6, sink, now() - t0);
+		return 0;
+	}
+	if (cmd == "search") {
+		std::vector<std::string> args(argv + 3, argv + argc);
+		std::map<std::string, std::string> opt;
+		Query q;
+		try {
+			q = parseQuery(P, T, args, opt);
+		} catch (std::exception& e) {
+			fprintf(stderr, "%s\n", e.what());
+			return 2;
+		}
+#ifndef SW_CPU_ONLY
+		if (!opt.count("cpu")) return searchGpu(P, T, q, opt);
+#endif
+		return searchCpu(P, T, q, opt);
+	}
 	fprintf(stderr, "unknown command %s\n", cmd.c_str());
 	return 2;
 }

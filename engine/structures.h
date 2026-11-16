@@ -56,21 +56,46 @@ HDN bool isStructureChunk(const StructTables& T, int set, uint64_t seed, int cx,
 // shared, so this evaluates the program once per y only for the ops downstream of the y gradient.
 struct Column {
 	int qminY, qmaxY;
-	int biome[100];
-	float depth[100];
+	int biome[100];  // filled by columnBiomes; columnClimate leaves it -1 (lazy)
+	float c6[100][6];
+	HD float depth(int qy) const { return c6[qy - qminY][4]; }
 };
 
-HDN void columnBiomes(const World& w, const PackDev& pk, int qx, int qz, Column& col) {
+HDN void columnClimate(const World& w, const PackDev& pk, int qx, int qz, Column& col) {
 	col.qminY = (pk.minY - 1) >> 2;
 	col.qmaxY = (pk.minY + pk.height - 1) >> 2;
-	float v[MAX_OPS];
+	float pv[MAX_OPS], v[MAX_OPS];
 	int upto = climateUpto(pk);
 	for (int qy = col.qminY; qy <= col.qmaxY; qy++) {
-		evalOps(w, pk, qx << 2, qy << 2, qz << 2, true, false, upto, v);
+		evalOpsState(w, pk, qx << 2, qy << 2, qz << 2, true, false, upto, pv, v, qy != col.qminY);
+		for (int i = 0; i < 6; i++) col.c6[qy - col.qminY][i] = v[pk.climate[i]];
+		col.biome[qy - col.qminY] = -1;
+	}
+}
+
+// bottom-up like vanilla's column loop, each search seeded with the previous leaf (RTree.lastResult)
+HD int columnBiome(const PackDev& pk, Column& col, int qy, int& leaf) {
+	int& b = col.biome[qy - col.qminY];
+	if (b < 0) {
+		leaf = leafFromClimate(pk, col.c6[qy - col.qminY], leaf);
+		b = pk.rnodes[leaf].biome;
+	}
+	return b;
+}
+
+HDN void columnBiomes(const World& w, const PackDev& pk, int qx, int qz, Column& col) {
+	int leaf = -1;
+	col.qminY = (pk.minY - 1) >> 2;
+	col.qmaxY = (pk.minY + pk.height - 1) >> 2;
+	float pv[MAX_OPS], v[MAX_OPS];
+	int upto = climateUpto(pk);
+	for (int qy = col.qminY; qy <= col.qmaxY; qy++) {
+		evalOpsState(w, pk, qx << 2, qy << 2, qz << 2, true, false, upto, pv, v, qy != col.qminY);
 		float c6[6];
 		for (int i = 0; i < 6; i++) c6[i] = v[pk.climate[i]];
-		col.biome[qy - col.qminY] = biomeFromClimate(pk, c6);
-		col.depth[qy - col.qminY] = c6[4];
+		leaf = leafFromClimate(pk, c6, leaf);
+		col.biome[qy - col.qminY] = pk.rnodes[leaf].biome;
+		for (int i = 0; i < 6; i++) col.c6[qy - col.qminY][i] = c6[i];
 	}
 }
 
@@ -85,17 +110,22 @@ HDN bool structureBiomeOk(const World& w, const PackDev& pk, const StructTables&
 		return maskHas(S.biomes, biomeAt(w, pk, ((cx << 4) + 8) >> 2, S.y >> 2, (cz << 4) >> 2, 0));
 	int qx = ((cx << 4) + 8) >> 2, qz = ((cz << 4) + 8) >> 2;
 	Column col;
-	columnBiomes(w, pk, qx, qz, col);
-	bool any = false;
-	for (int qy = col.qminY; qy <= col.qmaxY; qy++) any |= maskHas(S.biomes, col.biome[qy - col.qminY]);
-	if (!any) return false;
+	columnClimate(w, pk, qx, qz, col);
 	int surf = col.qminY;
 	for (int qy = col.qmaxY; qy >= col.qminY; qy--)
-		if (col.depth[qy - col.qminY] >= 0.0f) {
+		if (col.depth(qy) >= 0.0f) {
 			surf = qy;
 			break;
 		}
-	return maskHas(S.biomes, biomeAt(w, pk, qx, surf, qz, 2));
+	// both checks must pass: run the single-lookup start check first, then the column "any" scan
+	// starting at the surface (any-of is order independent; RTree results don't depend on the seed leaf
+	// except for exact ties, which vanilla itself resolves by thread history)
+	if (!maskHas(S.biomes, biomeAt(w, pk, qx, surf, qz, 2))) return false;
+	int leaf = -1;
+	if (maskHas(S.biomes, columnBiome(pk, col, surf, leaf))) return true;
+	for (int qy = col.qminY; qy <= col.qmaxY; qy++)
+		if (qy != surf && maskHas(S.biomes, columnBiome(pk, col, qy, leaf))) return true;
+	return false;
 }
 
 // Which structure of a set generates at a placement chunk (-1 = none): vanilla's weighted retry loop.

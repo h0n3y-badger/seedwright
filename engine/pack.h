@@ -337,6 +337,12 @@ inline Pack loadPack(const std::string& path) {
 			o.unshifted = isZero(o.a) && isZero(o.b) && isZero(o.c);
 		}
 	}
+	// y-dependence (for column evaluation): gradients, noises with a y scale, and anything downstream
+	auto ydepOf = [&](int i) { return i >= 0 && pk.ops[i].ydep; };
+	for (int i = 0; i < no; i++) {
+		Op& o = pk.ops[i];
+		o.ydep = o.code == OP_YGRAD || (o.code == OP_NOISE && o.d1 != 0.0) || ydepOf(o.a) || ydepOf(o.b) || ydepOf(o.c);
+	}
 	int ns = header("splines");
 	pk.nsplines = ns;
 	int npts = 0;
@@ -361,6 +367,18 @@ inline Pack loadPack(const std::string& path) {
 			}
 		}
 	}
+	// splines: y-dependent if any coordinate is
+	for (int pass = 0; pass < 2; pass++)
+		for (int i = 0; i < no; i++) {
+			Op& o = pk.ops[i];
+			if (o.code != OP_SPLINE) continue;
+			for (int j = 0; j < ns; j++)
+				if (pk.splines[j].coord >= 0 && pk.ops[pk.splines[j].coord].ydep) o.ydep = 1;  // conservative
+			for (int k = i + 1; k < no; k++) {
+				Op& u = pk.ops[k];
+				u.ydep |= ydepOf(u.a) || ydepOf(u.b) || ydepOf(u.c);
+			}
+		}
 	int nsp = header("spawn_target");
 	pk.nspawn = nsp;
 	for (int p = 0; p < nsp; p++) {
