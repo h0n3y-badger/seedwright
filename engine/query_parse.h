@@ -20,6 +20,7 @@
 #include "pack.h"
 #include "query.h"
 #include <cstring>
+#include <algorithm>
 #include <functional>
 #include <sstream>
 #include <stdexcept>
@@ -28,11 +29,26 @@
 
 namespace sw {
 
+// Vanilla's file names differ per village biome (weaponsmith / weapon_smith, butcher_shop / butchers_shop...):
+// buildings are matched by a canonical name, and job names work too (blacksmith, librarian, cleric...).
+inline std::string buildingKey(std::string n) {
+	static const char* alias[][2] = {
+		{"blacksmith", "weaponsmith"}, {"weapon_smith", "weaponsmith"}, {"weaponsmiths", "weaponsmith"},
+		{"tool_smith", "toolsmith"}, {"armorer_house", "armorer"}, {"butcher_shop", "butcher"}, {"butchers_shop", "butcher"},
+		{"masons_house", "mason"}, {"mason_house", "mason"}, {"shepherds_house", "shepherd"}, {"shepherd_house", "shepherd"},
+		{"fisher_cottage", "fisher"}, {"fletcher_house", "fletcher"}, {"cartographer_house", "cartographer"},
+		{"librarian", "library"}, {"cleric", "temple"}, {"church", "temple"}, {"leatherworker", "tannery"},
+	};
+	for (auto& c : n) c = (char)tolower((unsigned char)c);
+	for (auto& a : alias)
+		if (n == a[0]) return a[1];
+	return n;
+}
+
 struct QueryNames {
 	const Pack* P;
-	// building categories for structure st ("weaponsmith", ...); empty when layouts aren't available
-	std::function<int(int st, const std::string& category)> buildingCategory;
-	std::function<std::string(int category)> buildingName;
+	// building category names per pack structure index (empty: no village layouts in this pack/build)
+	std::vector<std::vector<std::pair<std::string, int>>> buildings;
 };
 
 class QueryParser {
@@ -44,7 +60,7 @@ public:
 	void parseInto(int parent, const std::string& text) {
 		tokenize(text);
 		pos = 0;
-		int e = parseOr(true, 0, -1);
+		int e = parseOr(true, 0, 0);
 		if (pos < toks.size()) fail("unexpected '" + toks[pos].s + "'");
 		attach(parent, e);
 	}
@@ -57,6 +73,15 @@ public:
 		n.first = n.next = -1;
 		n.count = 1;
 		return q.nnodes++;
+	}
+	void moveKids(int to, int from) {  // children of a { } group become direct children of `to`
+		for (int k = q.n[from].first; k >= 0;) {
+			int nx = q.n[k].next;
+			q.n[k].next = -1;
+			attach(to, k);
+			k = nx;
+		}
+		q.n[from].first = -1;
 	}
 	void attach(int parent, int child) {
 		int* link = &q.n[parent].first;
@@ -95,6 +120,19 @@ public:
 	}
 
 private:
+	std::string buildingList(uint64_t ctx) const {
+		std::vector<std::string> keys;
+		for (int st = 0; st < 64; st++)
+			if ((ctx >> st) & 1 && st < (int)N.buildings.size())
+				for (auto& b : N.buildings[st]) {
+					std::string k = buildingKey(b.first);
+					if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(k);
+				}
+		std::sort(keys.begin(), keys.end());
+		std::string s = " (has: ";
+		for (size_t i = 0; i < keys.size(); i++) s += (i ? ", " : "") + keys[i];
+		return s + ")";
+	}
 	std::string suggest(const std::string& name) const {
 		std::vector<std::string> hits;
 		for (auto& set : N.P->sets) {
@@ -180,7 +218,7 @@ private:
 	}
 
 	// commas: true = ',' means 'and' here; false = inside any{ }, where ',' separates alternatives
-	int parseOr(bool commaIsAnd, int depth, int structCtx) {
+	int parseOr(bool commaIsAnd, int depth, uint64_t structCtx) {
 		int a = parseAnd(commaIsAnd, depth, structCtx);
 		if (!peek("or")) return a;
 		int any = newNode(N_ANY);
@@ -188,7 +226,7 @@ private:
 		while (accept("or")) attach(any, parseAnd(commaIsAnd, depth, structCtx));
 		return any;
 	}
-	int parseAnd(bool commaIsAnd, int depth, int structCtx) {
+	int parseAnd(bool commaIsAnd, int depth, uint64_t structCtx) {
 		int a = parseUnary(depth, structCtx);
 		if (!(peek("and") || (commaIsAnd && peek(",")))) return a;
 		int all = newNode(N_ALL);
@@ -199,7 +237,7 @@ private:
 		}
 		return all;
 	}
-	int parseUnary(int depth, int structCtx) {
+	int parseUnary(int depth, uint64_t structCtx) {
 		if (accept("not")) {
 			int n = newNode(N_NOT);
 			attach(n, parseUnary(depth, structCtx));
@@ -207,7 +245,7 @@ private:
 		}
 		return parseAtom(depth, structCtx);
 	}
-	int block(int kind, int depth, int structCtx) {  // '{' or '}' into a group node
+	int block(int kind, int depth, uint64_t structCtx) {  // '{' or '}' into a group node
 		int g = newNode(kind);
 		expect("{");
 		if (accept("}")) return g;
@@ -215,12 +253,14 @@ private:
 			do attach(g, parseOr(false, depth, structCtx));
 			while (accept(","));
 		} else {
-			attach(g, parseOr(true, depth, structCtx));
+			int e = parseOr(true, depth, structCtx);
+			if (q.n[e].kind == N_ALL) moveKids(g, e);  // "{ a, b }": a and b directly, no inner group
+			else attach(g, e);
 		}
 		expect("}");
 		return g;
 	}
-	int parseAtom(int depth, int structCtx) {
+	int parseAtom(int depth, uint64_t structCtx) {
 		if (depth > MAX_DEPTH) fail("nested too deep (max " + std::to_string(MAX_DEPTH) + ")");
 		if (accept("(")) {
 			int e = parseOr(true, depth, structCtx);
@@ -266,7 +306,7 @@ private:
 			q.n[n].count = count;
 			if (count > MAX_STRONGHOLDS) fail("at most " + std::to_string(MAX_STRONGHOLDS) + " strongholds");
 			q.n[n].radius = within();
-			if (peek("{")) attach(n, block(N_ALL, depth + 1, -1));
+			if (peek("{")) moveKids(n, block(N_ALL, depth + 1, 0));
 			return n;
 		}
 		uint64_t sm;
@@ -278,21 +318,27 @@ private:
 			q.n[n].structMask = sm;
 			q.n[n].setMask = setm;
 			q.n[n].radius = within();
-			int ctx = __builtin_popcountll(sm) == 1 ? __builtin_ctzll(sm) : -2;  // -2: several structures
-			if (peek("{")) attach(n, block(N_ALL, depth + 1, ctx));
+			if (peek("{")) moveKids(n, block(N_ALL, depth + 1, sm));  // the structure itself is an implicit ALL
 			return n;
 		}
-		// a building category of the enclosing village
-		if (structCtx == -1) { pos--; fail("unknown structure '" + name + "'" + (isBuilding ? " (buildings only work inside a village's { })" : suggest(name))); }
-		if (!N.buildingCategory) { pos--; fail("village buildings aren't available in this build"); }
-		int cat = -1;
-		for (int st = 0; st < (int)N.P->structures.size() && cat < 0; st++)
-			if (structCtx == st || (structCtx == -2)) cat = N.buildingCategory(st, name);
-		if (cat < 0) { pos--; fail("'" + name + "' is neither a structure nor a building of this village"); }
+		// a building of the enclosing village(s)
+		if (structCtx == 0) { pos--; fail("unknown structure '" + name + "'" + (isBuilding ? " (buildings only work inside a village's { })" : suggest(name))); }
+		uint64_t cat[3] = {0, 0, 0};
+		std::string key = buildingKey(name);
+		bool anyLayouts = false;
+		for (int st = 0; st < 64; st++)
+			if ((structCtx >> st) & 1 && st < (int)N.buildings.size())
+				for (auto& b : N.buildings[st]) {
+					anyLayouts = true;
+					if (buildingKey(b.first) == key) cat[b.second >> 6] |= 1ULL << (b.second & 63);
+				}
+		if (!anyLayouts) { pos--; fail("'" + name + "' is not a structure, and this structure has no building layouts"); }
+		if (!(cat[0] | cat[1] | cat[2])) { pos--; fail("no building '" + name + "' in this structure" + buildingList(structCtx)); }
+		q.hasBuildings = 1;
 		int n = newNode(N_BUILDING);
 		label[n] = name;
 		q.n[n].count = count;
-		q.n[n].category = cat;
+		memcpy(q.n[n].cat, cat, sizeof cat);
 		return n;
 	}
 };
@@ -328,7 +374,7 @@ inline std::string queryText(const Pack& P, const Query& q, int ni, const QueryN
 		       (n.y == 64 ? "" : n.y == Y_ANY ? " at y=any" : " at y=" + std::to_string(n.y));
 	case N_STRONGHOLD: return std::to_string(n.count) + " stronghold within " + std::to_string(n.radius) + braces();
 	case N_SPAWN: return "spawn within " + std::to_string(n.radius);
-	case N_BUILDING: return std::to_string(n.count) + " " + (label && !label[ni].empty() ? label[ni] : N.buildingName ? N.buildingName(n.category) : "building");
+	case N_BUILDING: return std::to_string(n.count) + " " + (label && !label[ni].empty() ? label[ni] : "building");
 	}
 	return "?";
 }
@@ -345,7 +391,6 @@ inline std::string queryJson(const Pack& P, const Query& q, int ni, const QueryN
 	std::string j = std::string("{\"kind\": \"") + kinds[n.kind] + "\"";
 	if (n.kind == N_STRUCTURE || n.kind == N_BUILDING) {
 		std::string nm = label && !label[ni].empty() ? label[ni] : "";
-		if (nm.empty() && n.kind == N_BUILDING && N.buildingName) nm = N.buildingName(n.category);
 		if (nm.empty()) {  // legacy flag without a label: canonical text minus count/radius
 			std::string t = queryText(P, q, ni, N, label);
 			nm = t.substr(t.find(' ') + 1);

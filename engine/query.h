@@ -2,6 +2,7 @@
 // cherry_grove within 1500, not monument within 800"). Device-capable; nodes live in a flat array.
 #pragma once
 #include "structures.h"
+#include "jigsaw.h"
 
 namespace sw {
 
@@ -16,7 +17,7 @@ enum NodeKind {
 	N_BUILDING,    // >= count buildings of a category in the enclosing village (approximate)
 };
 
-enum { MAX_NODES = 48, MAX_HITS = 32, MAX_DEPTH = 6, Y_ANY = -100000, MAX_STRONGHOLDS = 32 };
+enum { MAX_NODES = 48, MAX_HITS = 32, MAX_DEPTH = 6, Y_ANY = -100000, MAX_STRONGHOLDS = 32, MAX_PIECES = 320 };
 
 struct Node {
 	int kind, count, radius, y;
@@ -24,11 +25,12 @@ struct Node {
 	uint64_t structMask;  // N_STRUCTURE: structure indices (bit i = structure i)
 	uint32_t setMask;     // sets that can produce one of those structures
 	int biome;            // N_BIOME
-	int category;         // N_BUILDING
+	uint64_t cat[3];      // N_BUILDING: jigsaw building categories that count (aliases: weaponsmith|weapon_smith)
 };
 
 struct Query {
 	int nnodes, root, anchorSpawn, slack, needSpawn;
+	int hasBuildings;  // needs village layouts (jigsaw tables + a piece buffer)
 	int exact;  // skip the slack-based prefilter (checking given seeds: the prefilter assumes spawn within slack of 0,0)
 	Node n[MAX_NODES];
 };
@@ -67,13 +69,10 @@ struct EvalCtx {
 	int shX[MAX_STRONGHOLDS], shZ[MAX_STRONGHOLDS];
 	int spawnX, spawnZ;
 	int curStructure, curCx, curCz;  // innermost enclosing structure (for buildings)
+	const JigsawTables* J;           // null: old pack, plain structureAt
+	Piece* pcs;                      // MAX_PIECES layout buffer (global memory on the GPU)
+	int npcs, layoutSt, layoutCx, layoutCz;
 };
-
-// N_BUILDING: buildings of one category in the enclosing village. Provided by jigsaw.h once village
-// layouts exist; until then the parser refuses building conditions.
-#ifndef SW_HAVE_JIGSAW
-HDN bool evalBuilding(EvalCtx&, const Node&, int, int, int) { return false; }
-#endif
 
 HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth);
 
@@ -114,7 +113,7 @@ HDN bool evalStructure(EvalCtx& c, const Node& nd, int ni, int ax, int az, int s
 					continue;
 				}
 				if (!isStructureChunk(*c.T, si, c.seed, px, pz)) continue;
-				int st = structureAt(*c.w, *c.pk, *c.T, si, px, pz);
+				int st = c.J ? jigsawStructureAt(*c.w, *c.pk, *c.T, *c.J, si, px, pz) : structureAt(*c.w, *c.pk, *c.T, si, px, pz);
 				if (st < 0 || !((nd.structMask >> st) & 1)) continue;
 				if (c.mode == EVAL_PRE) {
 					n++;
@@ -210,6 +209,26 @@ HDN bool evalStronghold(EvalCtx& c, const Node& nd, int ni, int ax, int az, int 
 	return true;
 }
 
+// Buildings of the enclosing village (layout from jigsaw.h; heights estimated -> approximate). The layout
+// is cached for the innermost enclosing structure.
+HDN bool evalBuilding(EvalCtx& c, const Node& nd, int depth) {
+	if (!c.J || !c.pcs || c.curStructure < 0) return false;
+	if (c.layoutSt != c.curStructure || c.layoutCx != c.curCx || c.layoutCz != c.curCz) {
+		c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, MAX_PIECES);
+		c.layoutSt = c.curStructure, c.layoutCx = c.curCx, c.layoutCz = c.curCz;
+	}
+	int n = 0;
+	for (int i = 0; i < c.npcs && n < nd.count; i++) {
+		int cat = pieceCategory(*c.J, c.pcs[i]);
+		if (cat < 0 || !((nd.cat[cat >> 6] >> (cat & 63)) & 1)) continue;
+		n++;
+		int b[6];
+		pieceBoxAbs(c.pcs[i], c.curCx, c.curCz, b);
+		addHit(c, WHAT_BUILDING0 - cat, (b[0] + b[3]) / 2, (b[2] + b[5]) / 2, depth);
+	}
+	return n >= nd.count;
+}
+
 HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth) {
 	const Node& nd = c.q->n[ni];
 	switch (nd.kind) {
@@ -241,7 +260,7 @@ HDN bool evalNode(EvalCtx& c, int ni, int ax, int az, int slack, int depth) {
 	case N_SPAWN:
 		return c.mode != EVAL_B || dist2(c.spawnX, c.spawnZ, 0, 0) <= (int64_t)nd.radius * nd.radius;
 	case N_BUILDING:
-		return c.mode != EVAL_B || evalBuilding(c, nd, ax, az, depth);
+		return c.mode != EVAL_B || evalBuilding(c, nd, depth);
 	}
 	return false;
 }
@@ -257,7 +276,8 @@ HDN bool stageA(const StructTables& T, const Query& q, uint64_t seed) {
 }
 
 // Stage B: full check for one 64-bit seed. w must be worldInit'ed for that seed.
-HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const Query& q, Hit& hit) {
+HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const Query& q, Hit& hit, const JigsawTables* J = nullptr,
+                Piece* pieces = nullptr) {
 	EvalCtx c{};
 	c.w = &w;
 	c.pk = &pk;
@@ -266,6 +286,9 @@ HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const 
 	c.seed = (uint64_t)w.seed;
 	c.curStructure = -1;
 	c.shRaw = -1;
+	c.J = J;
+	c.pcs = pieces;
+	c.layoutSt = -1;
 	hit.seed = w.seed;
 	hit.n = 0;
 	hit.spawnX = hit.spawnZ = 0;

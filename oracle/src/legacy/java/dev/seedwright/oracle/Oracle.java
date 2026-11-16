@@ -195,5 +195,12 @@ public final class Oracle
 		}
 		out.append("starts ").append(startCount).append('\n').append(starts);
 		Files.writeString(Path.of("oracle-" + seed + ".txt"), out);
+
+		// ---- jigsaw layouts (villages, outposts) with terrain heights: -Dseedwright.oracle.villages=R ----
+		int villages = Integer.getInteger("seedwright.oracle.villages", 0);
+		if (villages > 0)
+		{
+			JigsawDump.dump(level, generator, randomState, state, seed, villages, Oracle::id, names);
+		}
 	}
 }

@@ -3,6 +3,7 @@
 #include "structures.h"
 #include "query.h"
 #include "query_parse.h"
+#include "jigsaw_cli.h"
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -220,9 +221,30 @@ static bool nameMatches(const std::string& full, const std::string& want) {
 	return a == want || a.find(want) != std::string::npos;
 }
 
+// village layouts (jigsaw tables), built once; null host tables when the pack predates them
+static JigsawHost* gJig = nullptr;
+static const JigsawHost& jig(const Pack& P) {
+	if (!gJig) {
+		gJig = new JigsawHost();
+		try {
+			*gJig = buildJigsaw(P);
+		} catch (std::exception& e) {
+			gJig->t.reset();
+			gJig->error = e.what();
+		}
+	}
+	return *gJig;
+}
+
 static QueryNames queryNames(const Pack& P) {
 	QueryNames N;
 	N.P = &P;
+	const JigsawHost& H = jig(P);
+	if (H.t) {
+		N.buildings.resize(P.structures.size());
+		for (size_t st = 0; st < P.structures.size() && st < 64; st++)
+			for (auto& name : jigsawCategories(H, (int)st)) N.buildings[st].push_back({name, H.categoryIndex(name)});
+	}
 	return N;
 }
 
@@ -324,7 +346,10 @@ static Query parseQuery(const Pack& P, const StructTables& T, std::vector<std::s
 static std::string hitName(const Pack& P, int what) {
 	if (what >= 0) return P.structures[what].name.substr(10);
 	if (what == WHAT_STRONGHOLD) return "stronghold";
-	if (what <= WHAT_BUILDING0) return "building:" + std::to_string(WHAT_BUILDING0 - what);
+	if (what <= WHAT_BUILDING0) {
+		int cat = WHAT_BUILDING0 - what;
+		return gJig && cat < (int)gJig->categories.size() ? buildingKey(gJig->categories[cat]) : "building";
+	}
 	return P.biomes[-1 - what].substr(10);
 }
 
@@ -347,6 +372,7 @@ static std::vector<int64_t> parseSeeds(const std::string& s) {
 static double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
 static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt) {
+	const JigsawTables* J = jig(P).t.get();
 	const PackDev& pk = *P.dev;
 	long long maxResults = opt.count("max") ? std::stoll(opt["max"]) : 20;
 	std::atomic<long long> found{0};
@@ -355,7 +381,9 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 			auto* w = new World();
 			worldInit(*w, pk, s);
 			Hit h;
-			bool ok = stageB(*w, pk, T, q, h);  // q.exact: no stage A / slack prefilter for given seeds
+			std::vector<Piece> pcs(q.hasBuildings ? MAX_PIECES : 0);
+			bool ok = stageB(*w, pk, T, q, h, J, pcs.data());  // q.exact: no stage A / slack prefilter for given seeds
+			if (ok && opt.count("check-stage-a") && !stageA(T, q, (uint64_t)s)) printf("STAGE-A-UNSOUND %lld\n", (long long)s);  // test aid
 			if (ok) printHit(P, h);
 			else printf("%lld  no match\n", (long long)s);
 			delete w;
@@ -394,13 +422,14 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 #pragma omp parallel
 			{
 				World* w = new World();
+				std::vector<Piece> pcs(q.hasBuildings ? MAX_PIECES : 0);
 #pragma omp for schedule(dynamic, 64)
 				for (int hi = 0; hi < 65536; hi++) {
 					if (found >= maxResults) continue;
 					int64_t s = (int64_t)(((uint64_t)hi << 48) | lo);
 					worldInit(*w, pk, s);
 					Hit h;
-					if (stageB(*w, pk, T, q, h) && found++ < maxResults) {
+					if (stageB(*w, pk, T, q, h, J, pcs.data()) && found++ < maxResults) {
 						std::lock_guard<std::mutex> g(mu);
 						printHit(P, h);
 					}
@@ -431,12 +460,13 @@ __global__ void kStageA(const StructTables* T, const Query* q, uint64_t start, u
 	}
 }
 
-__global__ void kStageB(const PackDev* pk, const StructTables* T, const Query* q, const int64_t* seeds, unsigned n, World* worlds, Hit* hits, unsigned* nhits, unsigned cap) {
+__global__ void kStageB(const PackDev* pk, const StructTables* T, const Query* q, const int64_t* seeds, unsigned n, World* worlds, Hit* hits, unsigned* nhits, unsigned cap,
+                        const JigsawTables* J, Piece* pieces) {
 	World& w = worlds[blockIdx.x * blockDim.x + threadIdx.x];
 	for (unsigned i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {
 		worldInit(w, *pk, seeds[i]);
 		Hit h;
-		if (stageB(w, *pk, *T, *q, h)) {
+		if (stageB(w, *pk, *T, *q, h, J, pieces ? pieces + (size_t)(blockIdx.x * blockDim.x + threadIdx.x) * MAX_PIECES : nullptr)) {
 			unsigned k = atomicAdd(nhits, 1u);
 			if (k < cap) hits[k] = h;
 		}
@@ -445,7 +475,7 @@ __global__ void kStageB(const PackDev* pk, const StructTables* T, const Query* q
 
 static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt) {
 	long long maxResults = opt.count("max") ? std::stoll(opt["max"]) : 20;
-	CK(cudaDeviceSetLimit(cudaLimitStackSize, 16384));
+	CK(cudaDeviceSetLimit(cudaLimitStackSize, q.hasBuildings ? 24576 : 16384));
 	PackDev* dPk;
 	StructTables* dT;
 	Query* dQ;
@@ -461,6 +491,14 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 	const unsigned nWorlds = blocksB * tpb;
 	World* dW;
 	CK(cudaMalloc(&dW, sizeof(World) * nWorlds));
+	// jigsaw tables (structure starts checked where vanilla does) and, for building queries, layout buffers
+	JigsawTables* dJ = nullptr;
+	Piece* dPieces = nullptr;
+	if (const JigsawTables* J = jig(P).t.get()) {
+		CK(cudaMalloc(&dJ, sizeof(JigsawTables)));
+		CK(cudaMemcpy(dJ, J, sizeof(JigsawTables), cudaMemcpyHostToDevice));
+		if (q.hasBuildings) CK(cudaMalloc(&dPieces, sizeof(Piece) * MAX_PIECES * (size_t)nWorlds));
+	}
 	const unsigned long long capA = 1ull << 22;
 	const unsigned capH = 4096;
 	uint64_t* dLows;
@@ -481,7 +519,7 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 			unsigned n = (unsigned)std::min<size_t>(batch, seeds.size() - off);
 			CK(cudaMemcpy(dSeeds, seeds.data() + off, sizeof(int64_t) * n, cudaMemcpyHostToDevice));
 			CK(cudaMemset(dNH, 0, 4));
-			kStageB<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dHits, dNH, capH);
+			kStageB<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dHits, dNH, capH, dJ, dPieces);
 			CK(cudaGetLastError());
 			unsigned nh;
 			CK(cudaMemcpy(&nh, dNH, 4, cudaMemcpyDeviceToHost));
@@ -554,12 +592,24 @@ int main(int argc, char** argv) {
 	StructTables T = buildTables(P);
 	std::string cmd = argv[2];
 	if (cmd == "verify") return verify(P, T, std::vector<std::string>(argv + 3, argv + argc));
+	if (cmd.rfind("village", 0) == 0) return jigsawCommand(P, T, argc, argv);  // village, village-categories, village-verify, village-bench
 	if (cmd == "list") {  // machine-readable names for front ends: "set NAME", "structure SET NAME", "biome NAME"
 		for (auto& s : P.sets) {
 			printf("set %s\n", s.name.c_str());
 			for (int st : s.structs) printf("structure %s %s\n", s.name.c_str(), P.structures[st].name.substr(P.structures[st].name.find(':') + 1).c_str());
 		}
 		for (auto& b : P.biomes) printf("biome %s\n", b.substr(b.find(':') + 1).c_str());
+		// "building STRUCTURE NAME" (canonical names, see buildingKey), approximate layouts
+		QueryNames N = queryNames(P);
+		for (size_t st = 0; st < N.buildings.size(); st++) {
+			std::vector<std::string> keys;
+			for (auto& b : N.buildings[st]) {
+				std::string k = buildingKey(b.first);
+				if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(k);
+			}
+			std::sort(keys.begin(), keys.end());
+			for (auto& k : keys) printf("building %s %s\n", P.structures[st].name.substr(P.structures[st].name.find(':') + 1).c_str(), k.c_str());
+		}
 		return 0;
 	}
 	if (cmd == "bench") {  // single-thread per-stage cost
