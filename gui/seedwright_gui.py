@@ -21,7 +21,7 @@ from pathlib import Path
 from PySide6.QtCore import QMimeData, QPoint, QProcess, QRegularExpression, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QDrag, QFont, QGuiApplication, QRegularExpressionValidator
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QTabBar, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -791,10 +791,14 @@ class Main(QMainWindow):
         self.runBtn.setStyleSheet("font-weight: 700; padding: 6px 18px;")
         self.stopBtn = QPushButton("■  Stop")
         self.stopBtn.setEnabled(False)
-        self.mode = QComboBox()
-        self.mode.addItems(["Find seeds", "Crack a seed"])
-        self.mode.setToolTip("Find seeds: search for seeds matching blocks.\n"
-                             "Crack a seed: work out a world's seed from structures you have seen in it.")
+        self.mode = QTabBar()
+        for t, tip in (("Find seeds", "Search seeds for the blocks, measured from the world spawn (or 0,0)."),
+                       ("Rare layouts", "Same blocks, measured from 0,0: seeds are generated from where the structures must be\n"
+                                        "(LCG run backwards) instead of scanned one by one. Up to ~26x faster per required\n"
+                                        "structure for tight layouts, and it tells you at once when a layout is impossible."),
+                       ("Crack a seed", "Work out a world's seed from structures you have seen in it.")):
+            self.mode.setTabToolTip(self.mode.addTab(t), tip)
+        self.mode.setExpanding(False)
         top.addWidget(self.mode)
         top.addSpacing(16)
         top.addWidget(QLabel("Minecraft"))
@@ -958,7 +962,7 @@ class Main(QMainWindow):
         self.version.currentIndexChanged.connect(self.loadNames)
         for w in (self.gpu, self.cpu, self.origin, self.allBuildings):
             w.toggled.connect(self.queryChanged)
-        self.mode.currentIndexChanged.connect(self.modeChanged)
+        self.mode.currentChanged.connect(self.modeChanged)
         for w in (self.maxRes, self.slack):
             w.valueChanged.connect(self.queryChanged)
         self.count.valueChanged.connect(self.queryChanged)
@@ -1116,8 +1120,9 @@ class Main(QMainWindow):
                 enclosing = parent
                 while enclosing is not None and enclosing.kind not in ("structure", "stronghold"):
                     enclosing = enclosing.parentBlock()
-                b.ofLabel.setText("of it" if enclosing is not None else ("of 0,0" if self.origin.isChecked() else "of spawn"))
-        self.hatLabel.setText("🔍  Find seeds where, measured from " + ("0,0" if self.origin.isChecked() else "the world spawn") + ":")
+                b.ofLabel.setText("of it" if enclosing is not None else ("of 0,0" if self.fromOrigin() else "of spawn"))
+        self.hatLabel.setText(("🧩  Rare layout: seeds where, measured from 0,0:" if self.layoutMode() else
+                               "🔍  Find seeds where, measured from " + ("0,0" if self.origin.isChecked() else "the world spawn") + ":"))
         q = self.queryString()
         self.qtext.blockSignals(True)
         typed = self.applyBtn.isEnabled() and not getattr(self, "blocksChanged", True)
@@ -1179,11 +1184,20 @@ class Main(QMainWindow):
         self.runBtn.setText("▶  Crack" if c else "▶  Search")
         for w in (self.gpu, self.cpu):
             w.setVisible(not c)
+        lay = self.layoutMode()
+        for w in (self.origin, self.slack, self.count, self.start, self.seeds):
+            w.setEnabled(not lay)
         if c and self.crack.table.rowCount() == 0:
             self.crack.addClue()
         self.queryChanged()
 
     def cracking(self):
+        return self.mode.currentIndex() == 2
+
+    def fromOrigin(self):
+        return self.layoutMode() or self.origin.isChecked()
+
+    def layoutMode(self):
         return self.mode.currentIndex() == 1
 
     def args(self):
@@ -1192,15 +1206,19 @@ class Main(QMainWindow):
         a = [self.version.currentData(), "search", "--where", self.queryString()]
         if self.cpu.isChecked():
             a.append("--cpu")
-        if self.origin.isChecked():
+        if self.layoutMode():
+            a += ["--layout", "--origin"]
+        elif self.origin.isChecked():
             a.append("--origin")
-        if self.slack.value() != 256:
+        if self.slack.value() != 256 and not self.layoutMode():
             a += ["--slack", str(self.slack.value())]
         if self.allBuildings.isChecked() and "building" in self.usedKinds():
             a.append("--all-buildings")
         a += ["--max", str(self.maxRes.value())]
         seeds = re.sub(r"\s+", "", self.seeds.text()).strip(",")
-        if seeds:
+        if self.layoutMode():
+            pass  # the plan covers every structure seed that fits; --max stops it
+        elif seeds:
             a += ["--seeds", seeds]
         else:
             a += ["--count", str(self.count.value())]
@@ -1286,7 +1304,7 @@ class Main(QMainWindow):
         m = re.match(r"(-?\d+)\s+spawn\s+(-?\d+)\s+(-?\d+)\s*(.*)", line)
         if m:
             seed, sx, sz, rest = m.groups()
-            ax, az = (0, 0) if self.origin.isChecked() else (int(sx), int(sz))
+            ax, az = (0, 0) if self.fromOrigin() else (int(sx), int(sz))
             row = [seed, f"{sx}, {sz}", self.formatFound(rest, ax, az)]
         elif re.match(r"-?\d+\s+no match", line):
             row = [line.split()[0], "", "no match"]

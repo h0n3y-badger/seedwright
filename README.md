@@ -87,6 +87,16 @@ estimated layout is only a prefilter (it needs `count - --building-slack` buildi
 the prefilter (finds every match, much slower). `--seeds` checks are always exact. Versions before 26.3 (double
 precision engine) have no exact terrain yet: there building counts are still estimates and the CLI warns about it.
 
+**Rare layouts** (`--layout`, GUI tab "Rare layouts"; always measured from 0,0): instead of scanning low-48 seeds,
+generate only the structure seeds that put a required structure where the query allows it. For one top-level
+`N STRUCTURE within R`, each placement region in range only allows a few x (or z) offsets; fixing that `nextInt`
+draw and running the LCG backwards to the region seed gives exactly the seeds with that offset (|allowed|/lim of
+all 2^48). N of E regions -> any E-N+1 of them as pivots (pigeonhole), each seed emitted once. Every generated seed
+still goes through stage A, so results are a full scan's (minus seeds whose pivot draw hits nextInt's rejection,
+< 1e-7). It says at once when a layout is impossible (`4 villages within 150`: only 3 places can hold one) and when
+it isn't rare (then it's no faster). Example: `3 villages within 140, 3 pillager_outposts within 300`: first seed in
+18 s vs 106 s scanning. Self-test: `--layout-selftest` (generator exactness + coverage of a plain scan's survivors).
+
 **Cracking a seed** (the reverse: a world's seed from structures seen in it):
 `seedwright-cpu packs/26.3.pack crack village_plains@728,-376 desert_pyramid@360,-264 ... [spawn@X,Z[~TOL]]`.
 Coordinates are any block of the structure's start chunk (what `/locate` prints). Structure placement is a pure

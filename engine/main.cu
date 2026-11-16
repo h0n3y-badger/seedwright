@@ -5,7 +5,9 @@
 #include "query_parse.h"
 #include "jigsaw_cli.h"
 #include "crack_cli.h"
+#include "layout.h"
 #include <chrono>
+#include <random>
 #include <functional>
 #include <cstdlib>
 #include <iostream>
@@ -409,6 +411,20 @@ static bool stageBExact(const Pack& P, const StructTables& T, const Query& q, co
 	return stageB(w, *P.dev, T, q, h, jig(P).t.get(), pcs.data(), &g, false, (int)pcs.size());
 }
 
+// --layout: generate structure seeds from the query's required structure positions instead of scanning
+static bool layoutPlan(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt, LayoutPlan& L) {
+	if (!opt.count("layout")) return false;
+	std::string summary;
+	std::string err = planLayout(T, q, L, summary, [&](int si) { return P.sets[si].name; });
+	if (!err.empty()) {
+		fprintf(stderr, "%s\n", err.c_str());
+		exit(2);
+	}
+	fprintf(stderr, "%s\n", summary.c_str());
+	if (L.share > 0.25) fprintf(stderr, "note: this layout isn't rare; the normal search finds these just as fast\n");
+	return true;
+}
+
 static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::map<std::string, std::string>& opt, const Terrain* TR) {
 	const JigsawTables* J = jig(P).t.get();
 	const PackDev& pk = *P.dev;
@@ -429,8 +445,50 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 		}
 		return 0;
 	}
+	LayoutPlan L;
+	bool layout = layoutPlan(P, T, q, opt, L);
 	uint64_t start = opt.count("start") ? parseU64(opt["start"]) : 0;
-	uint64_t count = opt.count("count") ? parseU64(opt["count"]) : (1ULL << 24);
+	uint64_t count = opt.count("count") ? parseU64(opt["count"]) : layout ? L.total - std::min(start, L.total) : (1ULL << 24);
+	if (layout && opt.count("layout-selftest")) {  // test aid: generator exactness + coverage of a brute-force scan
+		std::mt19937_64 rng(1);
+		long long bad = 0, made = 0;
+		std::set<uint64_t> seen;
+		for (int i = 0; i < 200000; i++) {
+			uint64_t idx = rng() % L.total, sd;
+			if (!layoutSeed(T, L, idx, sd)) continue;
+			made++;
+			int k = 0;
+			while (k + 1 < L.n && idx >= L.p[k + 1].begin) k++;
+			const LayoutPivot& pv = L.p[k];
+			const Spread& sp = T.sets[pv.set].spread;
+			int px, pz;
+			spreadCandidate(sp, sd, pv.rx, pv.rz, px, pz);
+			int off = pv.axis ? pz - pv.rz * sp.spacing : px - pv.rx * sp.spacing;
+			if (!((pv.allowedMask >> off) & 1)) bad++;
+			if (!seen.insert(sd).second) bad++;
+		}
+		printf("generator: %lld seeds sampled, %lld wrong or duplicate\n", made, bad);
+		// coverage: every stage-A survivor of a plain scan must be emitted by some pivot
+		long long surv = 0, missed = 0;
+#pragma omp parallel for reduction(+ : surv, missed) schedule(dynamic, 65536)
+		for (long long i = 0; i < (long long)count; i++) {
+			uint64_t lo = (start + i) & LAYOUT_MASK;
+			if (!stageA(T, q, lo)) continue;
+			surv++;
+			bool covered = false;
+			for (int k = 0; k < L.n && !covered; k++) {
+				const LayoutPivot& pv = L.p[k];
+				const Spread& sp = T.sets[pv.set].spread;
+				int px, pz;
+				spreadCandidate(sp, lo, pv.rx, pv.rz, px, pz);
+				int off = pv.axis ? pz - pv.rz * sp.spacing : px - pv.rx * sp.spacing;
+				covered = (pv.allowedMask >> off) & 1;
+			}
+			missed += !covered;
+		}
+		printf("coverage: %lld stage-A survivors in the scanned range, %lld not covered by the plan\n", surv, missed);
+		return bad || missed;
+	}
 	// stage A streams in chunks so a huge --count never holds all survivors at once
 	std::mutex mu;
 	const uint64_t chunkA = 1ULL << 24;
@@ -447,6 +505,7 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 #pragma omp for schedule(dynamic, 65536)
 			for (long long i = 0; i < (long long)n; i++) {
 				uint64_t lo = (start + off + i) & 0xFFFFFFFFFFFFULL;
+				if (layout && !layoutSeed(T, L, start + off + i, lo)) continue;
 				if (stageA(T, q, lo)) mine.push_back(lo);
 			}
 			std::lock_guard<std::mutex> g(mu);
@@ -493,9 +552,11 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 #ifndef SW_CPU_ONLY
 #define CK(x) do { cudaError_t e = (x); if (e != cudaSuccess) { fprintf(stderr, "CUDA %s at %s:%d\n", cudaGetErrorString(e), __FILE__, __LINE__); exit(1); } } while (0)
 
-__global__ void kStageA(const StructTables* T, const Query* q, uint64_t start, uint64_t count, uint64_t* out, unsigned long long* nout, unsigned long long cap) {
+__global__ void kStageA(const StructTables* T, const Query* q, uint64_t start, uint64_t count, uint64_t* out, unsigned long long* nout, unsigned long long cap,
+                        const LayoutPlan* L) {
 	for (uint64_t i = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x; i < count; i += (uint64_t)gridDim.x * blockDim.x) {
 		uint64_t lo = (start + i) & 0xFFFFFFFFFFFFULL;
+		if (L && !layoutSeed(*T, *L, start + i, lo)) continue;
 		if (stageA(*T, *q, lo)) {
 			unsigned long long k = atomicAdd(nout, 1ull);  // 64-bit: a 2^32 batch where everything survives must not wrap to 0
 			if (k < cap) out[k] = lo;
@@ -607,8 +668,15 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		runB(v);
 		return 0;
 	}
+	LayoutPlan L;
+	bool layout = layoutPlan(P, T, q, opt, L);
+	LayoutPlan* dL = nullptr;
+	if (layout) {
+		CK(cudaMalloc(&dL, sizeof L));
+		CK(cudaMemcpy(dL, &L, sizeof L, cudaMemcpyHostToDevice));
+	}
 	uint64_t start = opt.count("start") ? parseU64(opt["start"]) : 0;
-	uint64_t count = opt.count("count") ? parseU64(opt["count"]) : (1ULL << 32);
+	uint64_t count = opt.count("count") ? parseU64(opt["count"]) : layout ? L.total - std::min(start, L.total) : (1ULL << 32);
 	// Stage A in batches; a batch with more survivors than the buffer holds is shrunk and redone, so no
 	// survivor is ever dropped and seeds are covered in order.
 	uint64_t chunkA = 1ULL << 24;  // grows x4 while batches stay well under the buffer
@@ -619,7 +687,7 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		uint64_t n = std::min(chunkA, count - off);
 		double t0 = now();
 		CK(cudaMemset(dN, 0, 8));
-		kStageA<<<sms * 16, 256>>>(dT, dQ, start + off, n, dLows, dN, capA);
+		kStageA<<<sms * 16, 256>>>(dT, dQ, start + off, n, dLows, dN, capA, dL);
 		CK(cudaGetLastError());
 		unsigned long long nl;
 		CK(cudaMemcpy(&nl, dN, 8, cudaMemcpyDeviceToHost));
@@ -634,8 +702,8 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 		survivors += nl;
 		off += n;
 		if (nl < capA / 8 && n == chunkA) chunkA = std::min<uint64_t>(chunkA * 4, 1ULL << 32);
-		fprintf(stderr, "stage A: %llu of %llu low-48 seeds done (%.0f M/s), %llu survivors so far\n", (unsigned long long)off,
-		        (unsigned long long)count, off / std::max(tA, 1e-9) / 1e6, survivors);
+		fprintf(stderr, "stage A: %llu of %llu %s done (%.0f M/s), %llu survivors so far\n", (unsigned long long)off,
+		        (unsigned long long)count, layout ? "layout candidates" : "low-48 seeds", off / std::max(tA, 1e-9) / 1e6, survivors);
 		for (size_t i = 0; i < lows.size() && found < maxResults;) {
 			hseeds.clear();
 			for (; i < lows.size() && hseeds.size() + 65536 <= batch; i++)
