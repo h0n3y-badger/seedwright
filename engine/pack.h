@@ -470,6 +470,7 @@ inline Pack loadPack(const std::string& path) {
 		ss >> pk.spawnTerms[p];
 		for (int t = 0; t < pk.spawnTerms[p]; t++) ss >> pk.spawnOp[p][t] >> pk.spawnLo[p][t] >> pk.spawnHi[p][t];
 	}
+	spawnPrepare(pk);
 	int nset = header("structure_sets");
 	std::vector<std::vector<std::string>> setTokens;
 	for (int i = 0; i < nset; i++) {

@@ -137,6 +137,18 @@ struct RNode {
 
 enum { MAX_OPS = 64, MAX_NOISES = 8, MAX_LAYERS = 64, MAX_SPLINES = 512, MAX_SPLINE_PTS = 1024, MAX_RNODES = 12000 };
 
+// Evaluation plan for the spawn climate terms: the distinct term ops in the order they are evaluated, and for
+// each step the ops (dependency closure minus what earlier steps already evaluated) it has to run.
+// Order: terms with a restrictive target range (some target does not cover the whole [-1,1] quantized range)
+// before always-satisfied ones, cheapest first (noise layers newly needed).
+struct SpawnPlan {
+	int n;
+	int op[16];
+	uint64_t mask[16];
+};
+
+enum { MAX_SPIRAL = 1024 };
+
 struct PackDev {
 	int legacy;  // 1 = MC 1.21.1-26.2 double-precision noise/density functions
 	int oldSpawn;  // 1 = 1.21.1 spawn fitness (quartic distance penalty)
@@ -145,6 +157,9 @@ struct PackDev {
 	int minY, height, seaLevel;
 	int nspawn, spawnTerms[4], spawnOp[4][8];
 	int64_t spawnLo[4][8], spawnHi[4][8];
+	SpawnPlan spawnPlan;  // spawnPrepare()
+	int nspiral[2];
+	int16_t spiral[2][MAX_SPIRAL][2];  // NoiseSpawnFinder spiral offsets (seed-independent)
 	Op ops[MAX_OPS];
 	NoiseDesc noises[MAX_NOISES];
 	LayerDesc layers[MAX_LAYERS];
@@ -387,11 +402,11 @@ HDN double legacyOp(const World& w, const PackDev& pk, const Op& o, int bx, int 
 }
 
 HDN void evalOpsState(const World& w, const PackDev& pk, int bx, int by, int bz, bool vol, bool colHit, int upto, double* pv, double* vv,
-                      bool ydepOnly) {
+                      bool ydepOnly, uint64_t mask = ~0ull) {  // mask: only ops whose bit is set are evaluated
 	if (pk.legacy) {  // one semantics (no separate volume path); results go to both arrays
 		for (int i = 0; i <= upto; i++) {
 			const Op& o = pk.ops[i];
-			if (ydepOnly && !o.ydep) continue;
+			if ((ydepOnly && !o.ydep) || !((mask >> i) & 1)) continue;
 			pv[i] = vv[i] = legacyOp(w, pk, o, bx, by, bz, pv);
 		}
 		return;
@@ -402,7 +417,7 @@ HDN void evalOpsState(const World& w, const PackDev& pk, int bx, int by, int bz,
 		double* R = V ? vv : pv;
 		for (int i = 0; i <= upto; i++) {
 			const Op& o = pk.ops[i];
-			if (ydepOnly && !o.ydep) continue;
+			if ((ydepOnly && !o.ydep) || !((mask >> i) & 1)) continue;
 			if (!V && colHit && o.cached) {
 				pv[i] = vv[i];
 				continue;
@@ -535,49 +550,142 @@ HD int64_t spawnDistancePenalty(const PackDev& pk, int bx, int bz) {
 	return (int64_t)((double)1.0E8F * pow(r, 2.0));
 }
 
-HD int64_t spawnFitness(const World& w, const PackDev& pk, int bx, int bz) {
-	int qbx = (bx >> 2) << 2, qbz = (bz >> 2) << 2;
-	float v[MAX_OPS];
-	int upto = 0;
-	for (int p = 0; p < pk.nspawn; p++)
-		for (int k = 0; k < pk.spawnTerms[p]; k++) upto = pk.spawnOp[p][k] > upto ? pk.spawnOp[p][k] : upto;
-	evalOps(w, pk, qbx, 0, qbz, false, false, upto, v);
-	int64_t minF = INT64_MAX;
-	for (int p = 0; p < pk.nspawn; p++) {
-		int64_t f = 0;
-		for (int k = 0; k < pk.spawnTerms[p]; k++) {
-			int64_t d = pdist(pk.spawnLo[p][k], pk.spawnHi[p][k], quantize(v[pk.spawnOp[p][k]]));
-			f += d * d;
-		}
-		minF = f < minF ? f : minF;
-	}
+// fitness from the climate distance (minF) and the position
+HD int64_t spawnCombine(const PackDev& pk, int64_t minF, int bx, int bz) {
 	if (pk.oldSpawn) return spawnDistancePenalty(pk, bx, bz) + minF;  // Climate.SpawnFinder (1.21.1)
 	return minF * (2048LL * 2048LL) + (int64_t)bx * bx + (int64_t)bz * bz;
+}
+
+HD uint64_t opClosure(const PackDev& pk, int t) {
+	uint64_t m = 1ull << t;
+	for (int i = t; i >= 0; i--) {
+		if (!((m >> i) & 1)) continue;
+		const Op& o = pk.ops[i];
+		if (o.code == OP_SPLINE) {  // spline coordinates: conservatively everything before it
+			m |= (i == 0) ? 0 : ((1ull << i) - 1);
+			break;
+		}
+		if (o.a >= 0) m |= 1ull << o.a;
+		if (o.b >= 0) m |= 1ull << o.b;
+		if (o.c >= 0) m |= 1ull << o.c;
+	}
+	return m;
+}
+
+HD int maskNoiseCost(const PackDev& pk, uint64_t m) {
+	int c = 0;
+	for (int i = 0; i < pk.nops; i++)
+		if ((m >> i) & 1) {
+			const Op& o = pk.ops[i];
+			if (o.code == OP_NOISE || o.code == OP_SHIFTA || o.code == OP_SHIFTB) c += 1 + pk.noises[o.i0].nlayers;
+			else if (o.code == OP_SPLINE) c += 1;
+		}
+	return c;
+}
+
+HD void spawnPlanInit(const PackDev& pk, SpawnPlan& sp) {
+	int ops[16], restrictive[16], n = 0;
+	for (int p = 0; p < pk.nspawn; p++)
+		for (int k = 0; k < pk.spawnTerms[p]; k++) {
+			int op = pk.spawnOp[p][k], j = 0;
+			while (j < n && ops[j] != op) j++;
+			if (j == n) {
+				ops[n] = op;
+				restrictive[n++] = 0;
+			}
+			if (pk.spawnLo[p][k] > -10000 || pk.spawnHi[p][k] < 10000) restrictive[j] = 1;
+		}
+	uint64_t done = 0;
+	sp.n = 0;
+	for (int s = 0; s < n; s++) {
+		int bj = -1, bc = 0, br = 0;
+		for (int j = 0; j < n; j++) {
+			if (ops[j] < 0) continue;
+			int c = maskNoiseCost(pk, opClosure(pk, ops[j]) & ~done);
+			if (bj < 0 || restrictive[j] > br || (restrictive[j] == br && c < bc)) {
+				bj = j;
+				bc = c;
+				br = restrictive[j];
+			}
+		}
+		uint64_t m = opClosure(pk, ops[bj]) & ~done;
+		sp.op[sp.n] = ops[bj];
+		sp.mask[sp.n++] = m;
+		done |= m;
+		ops[bj] = -1;
+	}
+}
+
+// Exact fitness, or INT64_MAX once a lower bound (fitness from the terms evaluated so far; every term is
+// a square >= 0) shows it is >= best. Ops are pure functions of their arguments, so evaluating a subset
+// in index order gives the same values as evaluating 0..upto.
+HD int64_t spawnFitnessBounded(const World& w, const PackDev& pk, const SpawnPlan& sp, int bx, int bz, int64_t best) {
+	int qbx = (bx >> 2) << 2, qbz = (bz >> 2) << 2;
+	double pv[MAX_OPS], vv[MAX_OPS];
+	int64_t part[4] = {0, 0, 0, 0};
+	int64_t minF = 0;
+	for (int s = 0; s < sp.n; s++) {
+		int op = sp.op[s];
+		evalOpsState(w, pk, qbx, 0, qbz, false, false, op, pv, vv, false, sp.mask[s]);
+		int64_t q = quantize((float)pv[op]);
+		minF = INT64_MAX;
+		for (int p = 0; p < pk.nspawn; p++) {
+			for (int k = 0; k < pk.spawnTerms[p]; k++)
+				if (pk.spawnOp[p][k] == op) {
+					int64_t d = pdist(pk.spawnLo[p][k], pk.spawnHi[p][k], q);
+					part[p] += d * d;
+				}
+			minF = part[p] < minF ? part[p] : minF;
+		}
+		if (s + 1 < sp.n && spawnCombine(pk, minF, bx, bz) >= best) return INT64_MAX;
+	}
+	return spawnCombine(pk, minF, bx, bz);
+}
+
+HD int64_t spawnFitness(const World& w, const PackDev& pk, int bx, int bz) {
+	return spawnFitnessBounded(w, pk, pk.spawnPlan, bx, bz, INT64_MAX);
+}
+
+// NoiseSpawnFinder's two spirals (radius <= 2048 step 512, then radius <= 512 step 32 around the stage-1 best).
+// The offsets (int)(sin(angle) * radius), (int)(cos(angle) * radius) don't depend on the seed: tabulated
+// once by spawnPrepare() (host) instead of ~930 sin/cos pairs per seed.
+inline void spawnPrepare(PackDev& pk) {
+	spawnPlanInit(pk, pk.spawnPlan);
+	const float steps[2][2] = {{2048.0f, 512.0f}, {512.0f, 32.0f}};
+	for (int s = 0; s < 2; s++) {
+		float maxR = steps[s][0], inc = steps[s][1];
+		float angle = 0.0f, radius = inc;
+		int n = 0;
+		while (radius <= maxR) {
+			if (n >= MAX_SPIRAL) abort();
+			pk.spiral[s][n][0] = (int16_t)(int)(sin((double)angle) * radius);
+			pk.spiral[s][n][1] = (int16_t)(int)(cos((double)angle) * radius);
+			n++;
+			angle += inc / radius;
+			if (angle > 6.283185307179586) {
+				angle = 0.0f;
+				radius += inc;
+			}
+		}
+		pk.nspiral[s] = n;
+	}
 }
 
 // returns spawn origin block (x,z); the spawn chunk is (x>>4, z>>4)
 HD void spawnOrigin(const World& w, const PackDev& pk, int& outX, int& outZ) {
 	int bx = 0, bz = 0;
-	int64_t best = spawnFitness(w, pk, 0, 0);
-	const float steps[2][2] = {{2048.0f, 512.0f}, {512.0f, 32.0f}};
+	int64_t best = spawnFitnessBounded(w, pk, pk.spawnPlan, 0, 0, INT64_MAX);
 	for (int s = 0; s < 2; s++) {
-		float maxR = steps[s][0], inc = steps[s][1];
-		float angle = 0.0f, radius = inc;
 		int ox = bx, oz = bz;
-		while (radius <= maxR) {
-			int x = ox + (int)(sin((double)angle) * radius);
-			int z = oz + (int)(cos((double)angle) * radius);
-			// fitness = climate*2048^2 + x^2+z^2 >= x^2+z^2: a candidate that far out can't win (exact pruning)
-			int64_t f = spawnDistancePenalty(pk, x, z) >= best ? INT64_MAX : spawnFitness(w, pk, x, z);
+		for (int i = 0; i < pk.nspiral[s]; i++) {
+			int x = ox + pk.spiral[s][i][0];
+			int z = oz + pk.spiral[s][i][1];
+			// the climate term is >= 0: a candidate whose distance part alone reaches best can't win (exact pruning)
+			int64_t f = spawnDistancePenalty(pk, x, z) >= best ? INT64_MAX : spawnFitnessBounded(w, pk, pk.spawnPlan, x, z, best);
 			if (f < best) {
 				best = f;
 				bx = x;
 				bz = z;
-			}
-			angle += inc / radius;
-			if (angle > 6.283185307179586) {
-				angle = 0.0f;
-				radius += inc;
 			}
 		}
 	}

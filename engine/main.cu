@@ -592,7 +592,7 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 	CK(cudaMemcpy(dQ, &q, sizeof q, cudaMemcpyHostToDevice));
 	int sms;
 	CK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0));
-	const int tpb = 128, blocksB = sms * 4;
+	const int tpb = 128, blocksB = sms * 16;  // more worlds in flight: stage B is memory-latency bound (measured +10-38%)
 	const unsigned nWorlds = blocksB * tpb;
 	World* dW;
 	CK(cudaMalloc(&dW, sizeof(World) * nWorlds));
