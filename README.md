@@ -53,7 +53,8 @@ be from 0,0 for the structure pre-filter, default 256), `--cpu`.
 GUI (PySide6): `python3 gui/seedwright_gui.py`. It runs the same CLI: each condition row is a
 `--need`/`--biome`/`--stronghold`/`--spawn-within`, with a slider and an editable entry for count and radius, and
 the exact command line is shown before it runs. Menu launcher: `gui/install.sh` (writes
-`~/.local/share/applications/seedwright-gui.desktop` pointing at this checkout; `--uninstall` removes it). `seedwright <pack> list` gives it the structure/biome names;
+`~/.local/share/applications/seedwright-gui.desktop` pointing at this checkout; `doas gui/install.sh --system`
+puts it in `/usr/share/applications` for launchers that only read that, like tux; `--uninstall` removes it). `seedwright <pack> list` gives it the structure/biome names;
 `--need =NAME` picks one structure exactly (no set or substring matching).
 
 Pipeline: stage A tests only the low 48 bits (structure placement is pure LCG) at ~5.7 G seeds/s on an
