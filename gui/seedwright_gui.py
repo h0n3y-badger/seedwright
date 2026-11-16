@@ -23,7 +23,7 @@ from PySide6.QtGui import QColor, QDrag, QFont, QGuiApplication, QRegularExpress
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
-    QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -626,6 +626,134 @@ class Palette(QWidget):
 
 # ------------------------------------------------------------------------------------------ main window
 
+class CrackPanel(QWidget):
+    """'Crack a seed' mode: structures seen in a world (+ the spawn point) -> `seedwright crack`."""
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        v = QVBoxLayout(self)
+        intro = QLabel(
+            "Type in structures you have found in a world, by the coordinates <b>/locate</b> gives (any block in the "
+            "structure's start chunk). Structure positions fix the lower 48 bits of the seed, the structure types "
+            "(biomes) and the spawn point fix the rest.<br>About <b>5-7 structures</b> usually give a single seed; "
+            "villages, temples, outposts, shipwrecks, ruined portals, monuments and trial chambers all work. "
+            "Mineshafts and strongholds don't.")
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.RichText)
+        v.addWidget(intro)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Structure", "X", "Z", ""])
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        for c, wd in ((1, 140), (2, 140), (3, 36)):
+            hh.setSectionResizeMode(c, QHeaderView.Fixed)
+            self.table.setColumnWidth(c, wd)
+        self.table.verticalHeader().hide()
+        v.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        add = QPushButton("+ Add structure")
+        add.clicked.connect(lambda: self.addClue())
+        row.addWidget(add)
+        row.addStretch()
+        self.info = QLabel()
+        row.addWidget(self.info)
+        v.addLayout(row)
+        sp = QHBoxLayout()
+        self.useSpawn = QCheckBox("World spawn at  X")
+        self.spX, self.spZ = QSpinBox(), QSpinBox()
+        for w in (self.spX, self.spZ):
+            w.setRange(-30_000_000, 30_000_000)
+        self.spTol = QSpinBox()
+        self.spTol.setRange(0, 1024)
+        self.spTol.setValue(128)
+        self.spTol.setSuffix(" b")
+        self.spTol.setToolTip("How far the spawn point may be from where seedwright puts the spawn search origin\n"
+                              "(the game moves the actual spawn up to ~100 blocks to find a grass block)")
+        sp.addWidget(self.useSpawn)
+        sp.addWidget(self.spX)
+        sp.addWidget(QLabel("Z"))
+        sp.addWidget(self.spZ)
+        sp.addWidget(QLabel("give or take"))
+        sp.addWidget(self.spTol)
+        sp.addStretch()
+        v.addLayout(sp)
+        for w in (self.useSpawn,):
+            w.toggled.connect(self.changed)
+        for w in (self.spX, self.spZ, self.spTol):
+            w.valueChanged.connect(self.changed)
+
+    def structureNames(self):
+        n = self.main.names
+        return sorted({st for s in n["sets"] if s not in ("strongholds", "mineshafts", "buried_treasures") for st in n["structs"][s]})
+
+    def addClue(self, name="village_plains", x=0, z=0):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        combo = searchable_combo(200)
+        combo.addItems(self.structureNames())
+        combo.setCurrentText(name)
+        combo.currentTextChanged.connect(self.changed)
+        self.table.setCellWidget(r, 0, combo)
+        for c, val in ((1, x), (2, z)):
+            sb = QSpinBox()
+            sb.setRange(-30_000_000, 30_000_000)
+            sb.setValue(val)
+            sb.valueChanged.connect(self.changed)
+            self.table.setCellWidget(r, c, sb)
+        rm = QPushButton("✕")
+        rm.setFixedWidth(28)
+        rm.clicked.connect(lambda: self.removeClue(rm))
+        self.table.setCellWidget(r, 3, rm)
+        self.changed()
+
+    def removeClue(self, btn):
+        for r in range(self.table.rowCount()):
+            if self.table.cellWidget(r, 3) is btn:
+                self.table.removeRow(r)
+                break
+        self.changed()
+
+    def refreshNames(self):
+        names = self.structureNames()
+        for r in range(self.table.rowCount()):
+            c = self.table.cellWidget(r, 0)
+            cur = c.currentText()
+            c.blockSignals(True)
+            c.clear()
+            c.addItems(names)
+            c.setCurrentText(cur)
+            c.blockSignals(False)
+
+    def clues(self):
+        return [(self.table.cellWidget(r, 0).currentText(), self.table.cellWidget(r, 1).value(), self.table.cellWidget(r, 2).value())
+                for r in range(self.table.rowCount())]
+
+    def args(self):
+        a = [f"{n}@{x},{z}" for n, x, z in self.clues()]
+        if self.useSpawn.isChecked():
+            a.append(f"spawn@{self.spX.value()},{self.spZ.value()}~{self.spTol.value()}")
+        return a
+
+    def changed(self, *_):
+        n = self.table.rowCount()
+        self.info.setText(f"{n} structure(s)" + ("  — usually not enough yet" if n < 5 else ""))
+        self.main.queryChanged()
+
+    def state(self):
+        return {"clues": self.clues(), "spawn": self.useSpawn.isChecked(), "spX": self.spX.value(), "spZ": self.spZ.value(),
+                "tol": self.spTol.value()}
+
+    def setState(self, s):
+        self.table.setRowCount(0)
+        for n, x, z in s.get("clues", []):
+            self.addClue(n, x, z)
+        self.useSpawn.setChecked(bool(s.get("spawn")))
+        self.spX.setValue(s.get("spX", 0))
+        self.spZ.setValue(s.get("spZ", 0))
+        self.spTol.setValue(s.get("tol", 128))
+
+
 class Main(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -663,6 +791,12 @@ class Main(QMainWindow):
         self.runBtn.setStyleSheet("font-weight: 700; padding: 6px 18px;")
         self.stopBtn = QPushButton("■  Stop")
         self.stopBtn.setEnabled(False)
+        self.mode = QComboBox()
+        self.mode.addItems(["Find seeds", "Crack a seed"])
+        self.mode.setToolTip("Find seeds: search for seeds matching blocks.\n"
+                             "Crack a seed: work out a world's seed from structures you have seen in it.")
+        top.addWidget(self.mode)
+        top.addSpacing(16)
         top.addWidget(QLabel("Minecraft"))
         top.addWidget(self.version)
         top.addSpacing(16)
@@ -676,7 +810,11 @@ class Main(QMainWindow):
         vsplit = QSplitter(Qt.Vertical)
         outer.addWidget(vsplit, 1)
         split = QSplitter(Qt.Horizontal)
-        vsplit.addWidget(split)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(split)
+        self.crack = CrackPanel(self)
+        self.stack.addWidget(self.crack)
+        vsplit.addWidget(self.stack)
 
         # ---------- palette
         self.palette = Palette(self)
@@ -820,6 +958,7 @@ class Main(QMainWindow):
         self.version.currentIndexChanged.connect(self.loadNames)
         for w in (self.gpu, self.cpu, self.origin, self.allBuildings):
             w.toggled.connect(self.queryChanged)
+        self.mode.currentIndexChanged.connect(self.modeChanged)
         for w in (self.maxRes, self.slack):
             w.valueChanged.connect(self.queryChanged)
         self.count.valueChanged.connect(self.queryChanged)
@@ -919,6 +1058,7 @@ class Main(QMainWindow):
         self.palette.items["building"].setVisible(bool(names["buildings"]))
         for b in self.allBlocks():
             b.fillNames(names)
+        self.crack.refreshNames()
         self.queryChanged()
 
     def structuresFor(self, name):
@@ -1033,7 +1173,22 @@ class Main(QMainWindow):
                 todo += b.mouth.blocks()
         return out
 
+    def modeChanged(self, *_):
+        c = self.cracking()
+        self.stack.setCurrentIndex(1 if c else 0)
+        self.runBtn.setText("▶  Crack" if c else "▶  Search")
+        for w in (self.gpu, self.cpu):
+            w.setVisible(not c)
+        if c and self.crack.table.rowCount() == 0:
+            self.crack.addClue()
+        self.queryChanged()
+
+    def cracking(self):
+        return self.mode.currentIndex() == 1
+
     def args(self):
+        if self.cracking():
+            return [self.version.currentData(), "crack"] + self.crack.args() + ["--max", str(self.maxRes.value())]
         a = [self.version.currentData(), "search", "--where", self.queryString()]
         if self.cpu.isChecked():
             a.append("--cpu")
@@ -1054,6 +1209,8 @@ class Main(QMainWindow):
         return a
 
     def binary(self):
+        if self.cracking():
+            return ENGINE / "seedwright-cpu"  # the crack is CPU-only (seconds for enough clues)
         return ENGINE / ("seedwright-gpu" if self.gpu.isChecked() else "seedwright-cpu")
 
     def updateCmd(self, *_):
@@ -1067,6 +1224,12 @@ class Main(QMainWindow):
     # ---------------------------------------------------------------- run
     def run(self):
         if self.proc:
+            return
+        if self.cracking():
+            if not self.crack.clues():
+                QMessageBox.information(self, "seedwright", "Add the structures you have found (+ Add structure).")
+                return
+            self.start_proc("cracking…")
             return
         if self.applyBtn.isEnabled():
             self.applyText()
@@ -1086,6 +1249,9 @@ class Main(QMainWindow):
             self.qerr.show()
             self.setStatus("query error (see below the query text)")
             return
+        self.start_proc("searching…")
+
+    def start_proc(self, what):
         self.saveState()
         self.table.setRowCount(0)
         self.log.appendPlainText("$ " + self.cmd.text())
@@ -1099,7 +1265,7 @@ class Main(QMainWindow):
         self.proc.start(str(self.binary()), self.args())
         self.runBtn.setEnabled(False)
         self.stopBtn.setEnabled(True)
-        self.setStatus("searching…")
+        self.setStatus(what)
 
     def stop(self):
         if self.proc:
@@ -1124,6 +1290,8 @@ class Main(QMainWindow):
             row = [seed, f"{sx}, {sz}", self.formatFound(rest, ax, az)]
         elif re.match(r"-?\d+\s+no match", line):
             row = [line.split()[0], "", "no match"]
+        elif re.fullmatch(r"-?\d+", line):  # crack: a world seed that fits every clue
+            row = [line, "", f"fits all {len(self.crack.clues())} structures" + (" and the spawn" if self.crack.useSpawn.isChecked() else "")]
         else:
             self.log.appendPlainText(line)
             return
@@ -1194,7 +1362,8 @@ class Main(QMainWindow):
     def saveState(self):
         s = {
             "version": self.version.currentText(), "cpu": self.cpu.isChecked(), "origin": self.origin.isChecked(),
-            "allBuildings": self.allBuildings.isChecked(), "slack": self.slack.value(), "max": self.maxRes.value(), "count": self.count.text(),
+            "allBuildings": self.allBuildings.isChecked(),
+            "mode": self.mode.currentIndex(), "crack": self.crack.state(), "slack": self.slack.value(), "max": self.maxRes.value(), "count": self.count.text(),
             "start": self.start.text(), "seeds": self.seeds.text(), "blocks": [b.state() for b in self.root.blocks()],
         }
         self.settings.setValue("state2", json.dumps(s))
@@ -1214,6 +1383,8 @@ class Main(QMainWindow):
             self.cpu.setChecked(True)
         self.origin.setChecked(bool(s.get("origin")))
         self.allBuildings.setChecked(bool(s.get("allBuildings")))
+        self.crack.setState(s.get("crack", {}))
+        self.mode.setCurrentIndex(s.get("mode", 0))
         self.slack.setValue(s.get("slack", 256))
         self.maxRes.setValue(s.get("max", 20))
         self.count.setText(s.get("count", "2^32"))

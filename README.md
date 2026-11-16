@@ -87,6 +87,16 @@ estimated layout is only a prefilter (it needs `count - --building-slack` buildi
 the prefilter (finds every match, much slower). `--seeds` checks are always exact. Versions before 26.3 (double
 precision engine) have no exact terrain yet: there building counts are still estimates and the CLI warns about it.
 
+**Cracking a seed** (the reverse: a world's seed from structures seen in it):
+`seedwright-cpu packs/26.3.pack crack village_plains@728,-376 desert_pyramid@360,-264 ... [spawn@X,Z[~TOL]]`.
+Coordinates are any block of the structure's start chunk (what `/locate` prints). Structure placement is a pure
+function of the low 48 bits; a `nextInt(n)` with `n = 2^k * odd` leaks the low k bits of each offset, which depend
+only on the low 17+k bits of the seed, so those are enumerated first (2^20), then the rest of the 48 bits per
+survivor; the upper 16 bits come from what actually generates there (biome checks) and the spawn (`~TOL`, default
+128: the game moves the real spawn up to ~100 blocks from the search origin). 5-7 structures usually give one seed
+in seconds; too few stops early as "ambiguous". Tested blind on two random seeds with structure starts dumped from
+the real game. In the GUI: "Crack a seed" in the top-left mode box.
+
 GUI (PySide6): `python3 gui/seedwright_gui.py`. Scratch-style blocks for the same language: drag blocks from the
 palette into the script, drop blocks into C-blocks (structures, strongholds, all/any/none) to measure them from
 there, drag a block back onto the palette to delete it. The query text under the blocks is the `--where` string and

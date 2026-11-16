@@ -4,6 +4,7 @@
 #include "query.h"
 #include "query_parse.h"
 #include "jigsaw_cli.h"
+#include "crack_cli.h"
 #include <chrono>
 #include <functional>
 #include <cstdlib>
@@ -665,6 +666,7 @@ int main(int argc, char** argv) {
 	StructTables T = buildTables(P);
 	std::string cmd = argv[2];
 	if (cmd == "verify") return verify(P, T, std::vector<std::string>(argv + 3, argv + argc));
+	if (cmd == "crack") return crackCommand(P, T, jig(P).t.get(), argc, argv);  // world seed from structures seen in a world
 	if (cmd.rfind("village", 0) == 0) return jigsawCommand(P, T, argc, argv);  // village, village-categories, village-verify, village-bench
 	if (cmd == "list") {  // machine-readable names for front ends: "set NAME", "structure SET NAME", "biome NAME"
 		for (auto& s : P.sets) {
