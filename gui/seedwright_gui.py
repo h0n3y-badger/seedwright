@@ -163,7 +163,7 @@ KINDS = {
 CATEGORIES = [
     ("Structures", ["structure", "stronghold"]),
     ("Biomes", ["biome"]),
-    ("Villages ≈", ["building"]),
+    ("Villages", ["building"]),
     ("Logic", ["all", "any", "not"]),
     ("World", ["spawn"]),
 ]
@@ -178,7 +178,8 @@ HELP = {
     "any": "At least one block inside must hold.",
     "not": "None of the blocks inside may hold.",
     "building": "Buildings in the village around it (put it inside a village block). weaponsmith = blacksmith.\n"
-                "Approximate: layouts use estimated terrain height, so counts are plausible, not guaranteed.",
+                "26.3: exact (every result is re-checked with the game's terrain heights).\n"
+                "Older versions (≈): layouts use estimated terrain height, so counts are plausible, not guaranteed.",
 }
 
 
@@ -359,9 +360,9 @@ class Block(QFrame):
             self.target = searchable_combo(170)
             self.target.currentTextChanged.connect(ch)
             h.addWidget(self.target, 0, 3, 1, 2)
-            approx = self.title("≈")
-            approx.setToolTip(HELP["building"])
-            h.addWidget(approx, 0, 5)
+            self.approx = self.title("≈")
+            self.approx.setToolTip(HELP["building"])
+            h.addWidget(self.approx, 0, 5)
         elif k == "biome":
             h.addWidget(self.title("biome"), 0, 1)
             self.target = searchable_combo()
@@ -741,6 +742,9 @@ class Main(QMainWindow):
         self.slack.setToolTip("Speed shortcut: seeds whose spawn is farther than this from 0,0 are skipped.\n"
                               "Checking given seeds is always exact.")
         self.origin = QCheckBox("Measure from 0,0 instead of spawn")
+        self.allBuildings = QCheckBox("Every village-building match (much slower)")
+        self.allBuildings.setToolTip("Without this, a fast estimate pre-filters villages and keeps ~85% of the real\n"
+                                     "matches; every result shown is still checked exactly (26.3).")
         self.count = Log2Entry(16, 48, 32)
         self.count.setToolTip("How many low-48 seeds to scan (--count); each survivor expands to 65 536 full seeds")
         self.start = QLineEdit("0")
@@ -752,6 +756,7 @@ class Main(QMainWindow):
             g.addWidget(QLabel(lab), r, 0)
             g.addWidget(w, r, 1)
         g.addWidget(self.origin, 5, 0, 1, 2)
+        g.addWidget(self.allBuildings, 6, 0, 1, 2)
         g.setColumnStretch(1, 1)
         rv.addWidget(og)
         rv.addStretch()
@@ -812,7 +817,7 @@ class Main(QMainWindow):
         self.applyBtn.clicked.connect(self.applyText)
         self.qtext.textChanged.connect(self._textEdited)
         self.version.currentIndexChanged.connect(self.loadNames)
-        for w in (self.gpu, self.cpu, self.origin):
+        for w in (self.gpu, self.cpu, self.origin, self.allBuildings):
             w.toggled.connect(self.queryChanged)
         for w in (self.maxRes, self.slack):
             w.valueChanged.connect(self.queryChanged)
@@ -955,6 +960,7 @@ class Main(QMainWindow):
                     if pending:
                         b.setTarget(pending)
                 b._pendingName = None
+                b.approx.setVisible(not self.exactBuildings())
                 if enc is None:
                     bad = "Put this inside a village block (a structure block for villages)."
                 elif not opts:
@@ -1014,6 +1020,18 @@ class Main(QMainWindow):
             self.loading = False
         self.refresh()
 
+    def exactBuildings(self):
+        return self.version.currentText() == "26.3"
+
+    def usedKinds(self):
+        out, todo = set(), list(self.root.blocks())
+        while todo:
+            b = todo.pop()
+            out.add(b.kind)
+            if b.mouth is not None:
+                todo += b.mouth.blocks()
+        return out
+
     def args(self):
         a = [self.version.currentData(), "search", "--where", self.queryString()]
         if self.cpu.isChecked():
@@ -1022,6 +1040,8 @@ class Main(QMainWindow):
             a.append("--origin")
         if self.slack.value() != 256:
             a += ["--slack", str(self.slack.value())]
+        if self.allBuildings.isChecked() and "building" in self.usedKinds():
+            a.append("--all-buildings")
         a += ["--max", str(self.maxRes.value())]
         seeds = re.sub(r"\s+", "", self.seeds.text()).strip(",")
         if seeds:
@@ -1169,7 +1189,7 @@ class Main(QMainWindow):
     def saveState(self):
         s = {
             "version": self.version.currentText(), "cpu": self.cpu.isChecked(), "origin": self.origin.isChecked(),
-            "slack": self.slack.value(), "max": self.maxRes.value(), "count": self.count.text(),
+            "allBuildings": self.allBuildings.isChecked(), "slack": self.slack.value(), "max": self.maxRes.value(), "count": self.count.text(),
             "start": self.start.text(), "seeds": self.seeds.text(), "blocks": [b.state() for b in self.root.blocks()],
         }
         self.settings.setValue("state2", json.dumps(s))
@@ -1188,6 +1208,7 @@ class Main(QMainWindow):
         if s.get("cpu") or not self.gpu.isEnabled():
             self.cpu.setChecked(True)
         self.origin.setChecked(bool(s.get("origin")))
+        self.allBuildings.setChecked(bool(s.get("allBuildings")))
         self.slack.setValue(s.get("slack", 256))
         self.maxRes.setValue(s.get("max", 20))
         self.count.setText(s.get("count", "2^32"))

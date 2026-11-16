@@ -31,7 +31,7 @@ struct JavaRandom {  // java.util.Random / LegacyRandomSource
 		do {
 			bits = next(31);
 			val = bits % bound;
-		} while (bits - val + (bound - 1) < 0);
+		} while ((int)((uint32_t)bits - (uint32_t)val + (uint32_t)(bound - 1)) < 0);  // Java int overflow (signed overflow is UB in C++)
 		return val;
 	}
 	HD int64_t nextLong() {

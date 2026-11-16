@@ -231,9 +231,9 @@ HD const SetDev* ringSet(const StructTables& T) {
 	return nullptr;
 }
 
-// Strongholds within radius (+slack) of the anchor. A stronghold ends up within 112 blocks (+ chunk
-// rounding) of its raw ring position, so only those whose raw position could be in range get the
-// expensive biome search; PRE mode decides on raw positions alone.
+// Strongholds within radius (+slack) of the anchor. A stronghold ends up inside a fixed box around its raw ring
+// chunk (strongholdBox), so only those whose box straddles the radius get the expensive biome search, and that
+// search stops as soon as the side is settled; PRE mode decides on the boxes alone.
 HDN void shResolve(EvalCtx& c, const SetDev& ring, int i) {
 	if ((c.shDone >> i) & 1) return;
 	strongholdResolve(*c.w, *c.pk, ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], c.shX[i], c.shZ[i]);
@@ -244,22 +244,31 @@ HDN bool evalStronghold(EvalCtx& c, const Node& nd, int ni, int ax, int az, int 
 	const SetDev* ring = ringSet(*c.T);
 	if (!ring) return false;
 	if (c.shRaw < 0) c.shRaw = strongholdRings(c.seed, *ring, MAX_STRONGHOLDS, c.shRawX, c.shRawZ, c.shFork);
-	const int margin = 112 + 24;  // final position vs raw ring chunk centre
-	int64_t R = nd.radius + slack;
-	int64_t Rout = R + margin, Rin = R - margin, R2 = R * R;
+	int64_t R = nd.radius + slack, R2 = R * R;
 	bool children = nd.first >= 0;
-	// decide without biome searches where the bound settles it: certainly in (raw well inside), certainly
-	// out (raw well outside); only borderline ones are resolved. Children need exact positions.
+	// decide without biome searches where the box settles it: certainly in, certainly out; only borderline
+	// ones are searched (and only until the side is known). Children need exact positions.
 	int n = 0, pick[MAX_STRONGHOLDS], np = 0;
 	for (int i = 0; i < c.shRaw && n < nd.count; i++) {
-		int64_t d2 = dist2(c.shRawX[i] * 16 + 8, c.shRawZ[i] * 16 + 8, ax, az);
-		if (d2 > Rout * Rout) continue;
-		if (c.mode == EVAL_PRE || (!children && Rin > 0 && d2 <= Rin * Rin)) {
+		int64_t dmin2, dmax2;
+		strongholdBox(c.shRawX[i], c.shRawZ[i], ax, az, dmin2, dmax2);
+		if (dmin2 > R2) continue;
+		if (c.mode == EVAL_PRE || (!children && dmax2 <= R2)) {
 			n++;
 			pick[np++] = i;
 			continue;
 		}
-		shResolve(c, *ring, i);
+		if (!children && !((c.shDone >> i) & 1)) {
+			int fx, fz, r = strongholdResolve(*c.w, *c.pk, *ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], fx, fz, ax, az, R2);
+			if (r == SH_EXACT) {
+				c.shX[i] = fx, c.shZ[i] = fz;
+				c.shDone |= 1u << i;
+			} else {
+				if (r == SH_IN) n++, pick[np++] = i;
+				continue;
+			}
+		} else
+			shResolve(c, *ring, i);
 		int x = c.shX[i] * 16 + 4, z = c.shZ[i] * 16 + 4;
 		if (dist2(x, z, ax, az) > R2) continue;
 		if (children) {

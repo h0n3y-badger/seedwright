@@ -181,32 +181,73 @@ HDN int strongholdRings(uint64_t seed, const SetDev& s, int want, int* rawX, int
 	return n;
 }
 
-// findBiomeHorizontal(sectionToBlock(ix,8), 0, sectionToBlock(iz,8), 112, preferred, fork) -> final chunk
-HDN void strongholdResolve(const World& w, const PackDev& pk, const SetDev& s, int ix, int iz, uint64_t forkSeed, int& outX, int& outZ) {
+// Where a stronghold can end up: the search cells are quarts 4*raw+2 +- 28, i.e. blocks 16*raw-104 .. 16*raw+120,
+// i.e. chunks raw-7 .. raw+7, so its block position chunk*16+4 lies in [16*raw-108, 16*raw+116] on each axis
+// (up to 164 blocks from the raw chunk centre on a diagonal). The no-match fallback (raw chunk) is inside too.
+HD void boxDist2(int x0, int x1, int z0, int z1, int ax, int az, int64_t& dmin2, int64_t& dmax2) {
+	int64_t nx = ax < x0 ? x0 - ax : ax > x1 ? ax - x1 : 0, nz = az < z0 ? z0 - az : az > z1 ? az - z1 : 0;
+	int64_t fx = ax - x0 > x1 - ax ? ax - x0 : x1 - ax, fz = az - z0 > z1 - az ? az - z0 : z1 - az;
+	dmin2 = nx * nx + nz * nz;
+	dmax2 = fx * fx + fz * fz;
+}
+HD void strongholdBox(int ix, int iz, int ax, int az, int64_t& dmin2, int64_t& dmax2) {
+	boxDist2(16 * ix - 108, 16 * ix + 116, 16 * iz - 108, 16 * iz + 116, ax, az, dmin2, dmax2);
+}
+
+enum { SH_OUT = 0, SH_IN = 1, SH_EXACT = 2 };
+
+// findBiomeHorizontal(sectionToBlock(ix,8), 0, sectionToBlock(iz,8), 112, preferred, fork) -> final chunk.
+// Vanilla keeps a uniformly random matching cell (reservoir: match j > 0 replaces the pick iff nextInt(j+1) == 0).
+// Call j always draws nextInt(j+1), so which match indices win is fixed by the fork seed alone; the RNG is run
+// ahead to the next winning index, and the scan stops once no later cell can reach it (the pick is final).
+// r2 >= 0: only "is the final block position within sqrt(r2) of (ax,az)" is wanted; the scan also stops at a row
+// end once every remaining cell and the current pick are on the same side. Returns SH_EXACT (outX/outZ final)
+// or SH_IN / SH_OUT (outX/outZ unspecified).
+HDN int strongholdResolve(const World& w, const PackDev& pk, const SetDev& s, int ix, int iz, uint64_t forkSeed, int& outX, int& outZ,
+                          int ax = 0, int az = 0, int64_t r2 = -1) {
 	JavaRandom search;
 	search.setSeed(forkSeed);
 	int cxq = ((ix << 4) + 8) >> 2, czq = ((iz << 4) + 8) >> 2, R = 112 >> 2;
-	int found = 0, rx = 0, rz = 0, leaf = -1;
+	const int N = (2 * R + 1) * (2 * R + 1);
+	int found = 0, rx = 0, rz = 0, leaf = -1, done = 0, nextWin = 0;
 	float pv[MAX_OPS];
 	int upto = climateUpto(pk);
-	for (int dz = -R; dz <= R; dz++)
+	// chunk-x span of every row (block positions chunk*16+4)
+	const int bx0 = (((cxq - R) << 2) >> 4) * 16 + 4, bx1 = (((cxq + R) << 2) >> 4) * 16 + 4;
+	for (int dz = -R; dz <= R; dz++) {
 		for (int dx = -R; dx <= R; dx++) {
 			// vanilla's RTree carries lastResult from query to query: chain it through the scan
 			evalOps(w, pk, (cxq + dx) << 2, 0, (czq + dz) << 2, false, false, upto, pv);
 			float c6[6];
 			for (int k = 0; k < 6; k++) c6[k] = pv[pk.climate[k]];
 			leaf = leafFromClimate(pk, c6, leaf);
-			int b = pk.rnodes[leaf].biome;
-			if (maskHas(s.preferred, b)) {
-				if (found == 0 || search.nextInt(found + 1) == 0) {
+			done++;
+			if (maskHas(s.preferred, pk.rnodes[leaf].biome)) {
+				if (found == nextWin) {
 					rx = (cxq + dx) << 2;
 					rz = (czq + dz) << 2;
+					// later matches get indices found+1 .. found+(N-done); find the next winner among them
+					int j = found + 1, lim = found + 1 + (N - done);
+					while (j < lim && search.nextInt(j + 1) != 0) j++;
+					nextWin = j;
 				}
 				found++;
 			}
+			if (nextWin >= found + (N - done)) goto final;  // no later cell can win
 		}
+		if (r2 >= 0 && dz < R) {
+			int64_t cx = (found ? rx >> 4 : ix) * 16 + 4 - ax, cz = (found ? rz >> 4 : iz) * 16 + 4 - az;
+			bool in = cx * cx + cz * cz <= r2;
+			int64_t dmin2, dmax2;
+			boxDist2(bx0, bx1, (((czq + dz + 1) << 2) >> 4) * 16 + 4, (((czq + R) << 2) >> 4) * 16 + 4, ax, az, dmin2, dmax2);
+			if (in && dmax2 <= r2) return SH_IN;
+			if (!in && dmin2 > r2) return SH_OUT;
+		}
+	}
+final:
 	outX = found ? rx >> 4 : ix;
 	outZ = found ? rz >> 4 : iz;
+	return SH_EXACT;
 }
 
 // Computes the first `want` ring positions (each is independent of the later ones).
