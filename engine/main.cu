@@ -626,7 +626,7 @@ __global__ void kStageA(const StructTables* T, const Query* q, uint64_t start, u
 	}
 }
 
-__global__ void kStageB(const PackDev* pk, const StructTables* T, const Query* q, const int64_t* seeds, unsigned n, World* worlds, Hit* hits, unsigned* nhits, unsigned cap,
+__global__ void __launch_bounds__(128, 4) kStageB(const PackDev* pk, const StructTables* T, const Query* q, const int64_t* seeds, unsigned n, World* worlds, Hit* hits, unsigned* nhits, unsigned cap,
                         const JigsawTables* J, Piece* pieces, int prefilter, const LootTables* L) {
 	World& w = worlds[blockIdx.x * blockDim.x + threadIdx.x];
 	for (unsigned i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {
