@@ -197,12 +197,14 @@ HD double wrapCoord(double x) {
 HD float smoothstep(float x) { return x * x * x * (x * (x * 6.0f - 15.0f) + 10.0f); }
 HD float lerpf(float a, float p0, float p1) { return p0 + a * (p1 - p0); }
 
+// Gradient table {1,1,0},{-1,1,0},{1,-1,0},{-1,-1,0},{1,0,1},{-1,0,1},{1,0,-1},{-1,0,-1},{0,1,1},{0,-1,1},{0,1,-1},
+// {0,-1,-1},{1,1,0},{0,-1,1},{-1,1,0},{0,-1,-1}, packed as 2-bit (g+1) fields per h: pure ALU. (A local array here
+// was rebuilt on the device stack for every corner: 48 bytes of local stores per corner.) Same -1/0/+1 values.
 HD void grad(int h, float& gx, float& gy, float& gz) {
-	const int8_t G[16][3] = {{1, 1, 0}, {-1, 1, 0}, {1, -1, 0}, {-1, -1, 0}, {1, 0, 1}, {-1, 0, 1}, {1, 0, -1}, {-1, 0, -1},
-	                         {0, 1, 1}, {0, -1, 1}, {0, 1, -1}, {0, -1, -1}, {1, 1, 0}, {0, -1, 1}, {-1, 1, 0}, {0, -1, -1}};
-	gx = G[h][0];
-	gy = G[h][1];
-	gz = G[h][2];
+	const uint32_t GX = 0x46552222u, GY = 0x2222550Au, GZ = 0x190A0A55u;
+	gx = (float)((int)((GX >> (2 * h)) & 3u) - 1);
+	gy = (float)((int)((GY >> (2 * h)) & 3u) - 1);
+	gz = (float)((int)((GZ >> (2 * h)) & 3u) - 1);
 }
 
 HD float corner(int h, float x, float y, float z, bool vol) {
