@@ -423,8 +423,16 @@ static uint64_t parseU64(const std::string& v) {
 	return r;
 }
 
-static void printHit(const Pack& P, const Hit& h) {
-	printf("%lld  spawn %d %d ", (long long)h.seed, h.spawnX, h.spawnZ);
+// Searches measured from 0,0 (--origin, --layout) with no spawn condition skip the spawn search, so the hit
+// carries 0,0; work it out here instead, only for the seeds that get printed.
+static void printHit(const Pack& P, const Query& q, const Hit& h) {
+	int sx = h.spawnX, sz = h.spawnZ;
+	if (!q.anchorSpawn && !q.needSpawn) {
+		static thread_local std::unique_ptr<World> w(new World());
+		worldInit(*w, *P.dev, h.seed);
+		spawnOrigin(*w, *P.dev, sx, sz);
+	}
+	printf("%lld  spawn %d %d ", (long long)h.seed, sx, sz);
 	for (int i = 0; i < h.n; i++) printf(" | %s%s %d %d", std::string(h.depth[i], '>').c_str(), hitName(P, h.what[i]).c_str(), h.x[i], h.z[i]);
 	printf("\n");
 	fflush(stdout);
@@ -493,7 +501,7 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 			// q.exact: no stage A / slack prefilter for given seeds
 			bool ok = TR ? stageBExact(P, T, q, *TR, s, *w, pcs, h) : stageB(*w, pk, T, q, h, J, pcs.data(), nullptr, false, MAX_PIECES, lootTables(P));
 			if (ok && opt.count("check-stage-a") && !stageA(T, q, (uint64_t)s)) printf("STAGE-A-UNSOUND %lld\n", (long long)s);  // test aid
-			if (ok) printHit(P, h);
+			if (ok) printHit(P, q, h);
 			else printf("%lld  no match\n", (long long)s);
 			delete w;
 		}
@@ -586,7 +594,7 @@ static int searchCpu(const Pack& P, const StructTables& T, const Query& q, std::
 					if (ok && TR) ok = stageBExact(P, T, q, *TR, s, *w, pcs, h);
 					if (ok && found++ < maxResults) {
 						std::lock_guard<std::mutex> g(mu);
-						printHit(P, h);
+						printHit(P, q, h);
 					}
 				}
 				delete w;
@@ -712,11 +720,11 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 					delete w;
 				}
 				for (unsigned i = c0; i < c1; i++)
-					if (ok[i] && found++ < maxResults) printHit(P, hits[i]);
+					if (ok[i] && found++ < maxResults) printHit(P, q, hits[i]);
 			}
 		} else {
 			for (auto& h : hits)
-				if (found++ < maxResults) printHit(P, h);
+				if (found++ < maxResults) printHit(P, q, h);
 		}
 	};
 	auto runB = [&](const std::vector<int64_t>& seeds) {
