@@ -109,8 +109,42 @@ struct Octave {
 		float fry = (float)(ry - fudgeY(Y, ry));
 		return sampleAndLerp(fx, fy, fz, rx, fry, rz, (float)ry);
 	}
+	// Everything that depends on y alone, per volume y-row: corner columns all share one y grid, so it is worked out
+	// once per (octave, y grid) instead of once per sample. Same operations in the same order as inline.
+	struct YRow {
+		int fy;
+		float ay, t;
+	};
+	struct YTable {
+		double yScale = 0;
+		int y0 = 0, sy = -1, sty = 0;
+		std::vector<YRow> row;
+	};
+	mutable YTable ytab[2];
+	mutable int ytabNext = 0;
+	const YRow* yRows(const Vol& v, double yScale) const {
+		for (auto& t : ytab)
+			if (t.sy == v.sy && t.y0 == v.y0 && t.sty == v.sty && t.yScale == yScale) return t.row.data();
+		YTable& t = ytab[ytabNext];
+		ytabNext ^= 1;
+		t.yScale = yScale;
+		t.y0 = v.y0;
+		t.sy = v.sy;
+		t.sty = v.sty;
+		t.row.resize(v.sy);
+		for (int iy = 0; iy < v.sy; iy++) {
+			double oy = v.by(iy) * yScale;
+			double y = wrapCoord(oy) + p.oy;
+			int fy = (int)floor(y);
+			double rY = y - fy;
+			float ry = (float)rY;
+			t.row[iy] = YRow{fy, smoothstep(ry), smeared ? (float)(rY - fudgeY(oy, rY)) : ry};
+		}
+		return t.row.data();
+	}
 	// PerlinNoise/SmearedPerlinNoise.addToVolume
 	void addToVolume(float* buf, const Vol& v, double xzScale, double yScale, float amplitude) const {
+		const YRow* yr = yRows(v, yScale);
 		int index = 0;
 		for (int iz = 0; iz < v.sz; iz++) {
 			double z = wrapCoord(v.bz(iz) * xzScale) + p.oz;
@@ -125,12 +159,8 @@ struct Octave {
 				int lastFy = INT32_MIN;
 				float d[8] = {0}, g[8] = {0};
 				for (int iy = 0; iy < v.sy; iy++) {
-					double oy = v.by(iy) * yScale;
-					double y = wrapCoord(oy) + p.oy;
-					int fy = (int)floor(y);
-					double rY = y - fy;
-					float ry = (float)rY;
-					float ay = smoothstep(ry);
+					const int fy = yr[iy].fy;
+					const float ay = yr[iy].ay;
 					if (lastFy != fy) {
 						int xy00 = perm(x0 + fy), xy01 = perm(x0 + fy + 1), xy10 = perm(x1 + fy), xy11 = perm(x1 + fy + 1);
 						const int8_t* G[8] = {grad(xy00 + fz), grad(xy10 + fz), grad(xy01 + fz), grad(xy11 + fz),
@@ -143,7 +173,7 @@ struct Octave {
 						}
 						lastFy = fy;
 					}
-					float t = smeared ? (float)(rY - fudgeY(oy, rY)) : ry;
+					const float t = yr[iy].t;
 					float t1 = t - 1.0f;
 					buf[index] += amplitude * lerp3F(ax, ay, az, d[0] + g[0] * t, d[1] + g[1] * t, d[2] + g[2] * t1, d[3] + g[3] * t1, d[4] + g[4] * t,
 					                                 d[5] + g[5] * t, d[6] + g[6] * t1, d[7] + g[7] * t1);
