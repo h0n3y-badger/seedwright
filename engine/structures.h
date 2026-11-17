@@ -209,7 +209,8 @@ HDN int strongholdResolve(const World& w, const PackDev& pk, const SetDev& s, in
 	search.setSeed(forkSeed);
 	int cxq = ((ix << 4) + 8) >> 2, czq = ((iz << 4) + 8) >> 2, R = 112 >> 2;
 	const int N = (2 * R + 1) * (2 * R + 1);
-	int found = 0, rx = 0, rz = 0, leaf = -1, done = 0, nextWin = 0;
+	int found = 0, rx = 0, rz = 0, leaf = -1, done = 0, nextWin = 0, lastRow = -1;
+	bool pickMoved = true;
 	float pv[MAX_OPS];
 	int upto = climateUpto(pk);
 	// chunk-x span of every row (block positions chunk*16+4)
@@ -226,6 +227,7 @@ HDN int strongholdResolve(const World& w, const PackDev& pk, const SetDev& s, in
 				if (found == nextWin) {
 					rx = (cxq + dx) << 2;
 					rz = (czq + dz) << 2;
+					pickMoved = true;
 					// later matches get indices found+1 .. found+(N-done); find the next winner among them
 					int j = found + 1, lim = found + 1 + (N - done);
 					while (j < lim && search.nextInt(j + 1) != 0) j++;
@@ -234,14 +236,22 @@ HDN int strongholdResolve(const World& w, const PackDev& pk, const SetDev& s, in
 				found++;
 			}
 			if (nextWin >= found + (N - done)) goto final;  // no later cell can win
-		}
-		if (r2 >= 0 && dz < R) {
-			int64_t cx = (found ? rx >> 4 : ix) * 16 + 4 - ax, cz = (found ? rz >> 4 : iz) * 16 + 4 - az;
-			bool in = cx * cx + cz * cz <= r2;
-			int64_t dmin2, dmax2;
-			boxDist2(bx0, bx1, (((czq + dz + 1) << 2) >> 4) * 16 + 4, (((czq + R) << 2) >> 4) * 16 + 4, ax, az, dmin2, dmax2);
-			if (in && dmax2 <= r2) return SH_IN;
-			if (!in && dmin2 > r2) return SH_OUT;
+			if (r2 >= 0) {
+				// match nextWin (the next one that can replace the pick) is at least nextWin - found matches away,
+				// and every cell holds at most one: it lies at scan index >= done + nextWin - found, i.e. in rows
+				// from that index's row on. The pick is final unless such a cell matches.
+				int row = (done + nextWin - found) / (2 * R + 1);
+				if (row != lastRow || pickMoved) {
+					lastRow = row;
+					pickMoved = false;
+					int64_t cx = (found ? rx >> 4 : ix) * 16 + 4 - ax, cz = (found ? rz >> 4 : iz) * 16 + 4 - az;
+					bool in = cx * cx + cz * cz <= r2;
+					int64_t dmin2, dmax2;
+					boxDist2(bx0, bx1, (((czq - R + row) << 2) >> 4) * 16 + 4, (((czq + R) << 2) >> 4) * 16 + 4, ax, az, dmin2, dmax2);
+					if (in && dmax2 <= r2) return SH_IN;
+					if (!in && dmin2 > r2) return SH_OUT;
+				}
+			}
 		}
 	}
 final:

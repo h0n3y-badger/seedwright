@@ -413,6 +413,41 @@ HDN bool evalStronghold(EvalCtx& c, const Node& nd, int ni, int ax, int az, int 
 	// decide without biome searches where the box settles it: certainly in, certainly out; only borderline
 	// ones are searched (and only until the side is known). Children need exact positions.
 	int n = 0, pick[MAX_STRONGHOLDS], np = 0;
+	if (!children && c.mode == EVAL_B) {
+		// Only the count matters, not which ones: count the boxes certainly inside (and already resolved ones)
+		// first, then search borderline ones only while they can still decide it.
+		int cand[MAX_STRONGHOLDS], nc = 0;
+		for (int i = 0; i < c.shRaw; i++) {
+			int64_t dmin2, dmax2;
+			strongholdBox(c.shRawX[i], c.shRawZ[i], ax, az, dmin2, dmax2);
+			if (dmin2 > R2) continue;
+			if (dmax2 <= R2) n++;
+			else if ((c.shDone >> i) & 1) n += dist2(c.shX[i] * 16 + 4, c.shZ[i] * 16 + 4, ax, az) <= R2;
+			else cand[nc++] = i;
+		}
+		for (int k = 0; k < nc && n < nd.count && n + (nc - k) >= nd.count; k++) {
+			int i = cand[k], fx, fz, r = strongholdResolve(*c.w, *c.pk, *ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], fx, fz, ax, az, R2);
+			if (r == SH_EXACT) {
+				c.shX[i] = fx, c.shZ[i] = fz;
+				c.shDone |= 1u << i;
+				r = dist2(fx * 16 + 4, fz * 16 + 4, ax, az) <= R2 ? SH_IN : SH_OUT;
+			}
+			n += r == SH_IN;
+		}
+		if (n < nd.count) return false;
+		if (c.hit)  // matched: the report lists the first nd.count in ring order, at exact coordinates
+			for (int i = 0, k = 0; i < c.shRaw && k < nd.count; i++) {
+				int64_t dmin2, dmax2;
+				strongholdBox(c.shRawX[i], c.shRawZ[i], ax, az, dmin2, dmax2);
+				if (dmin2 > R2) continue;
+				shResolve(c, *ring, i);
+				int x = c.shX[i] * 16 + 4, z = c.shZ[i] * 16 + 4;
+				if (dmax2 > R2 && dist2(x, z, ax, az) > R2) continue;
+				k++;
+				addHit(c, WHAT_STRONGHOLD, x, z, depth);
+			}
+		return true;
+	}
 	for (int i = 0; i < c.shRaw && n < nd.count; i++) {
 		int64_t dmin2, dmax2;
 		strongholdBox(c.shRawX[i], c.shRawZ[i], ax, az, dmin2, dmax2);
