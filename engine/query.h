@@ -42,6 +42,7 @@ struct Node {
 struct Query {
 	int nnodes, root, anchorSpawn, slack, needSpawn;
 	int hasBuildings;  // needs village layouts (jigsaw tables + a piece buffer)
+	int hasVillageLoot;  // village loot conditions want the whole layout: building checks then don't stop it early
 	int exact;  // skip the slack-based prefilter (checking given seeds: the prefilter assumes spawn within slack of 0,0)
 	// building prefilter (stageB with prefilter=true, estimated terrain; survivors are re-checked with exact heights):
 	int buildingSlack;  // estimated layout needs count - buildingSlack buildings (estimates miss real ones)
@@ -212,6 +213,7 @@ struct EvalCtx {
 	const JigsawTables* J;           // null: old pack, plain structureAt
 	Piece* pcs;                      // MAX_PIECES layout buffer (global memory on the GPU)
 	int npcs, layoutSt, layoutCx, layoutCz;
+	bool layoutPartial;  // c.pcs is a prefix of the layout (stopped once a building condition was met)
 	const HeightGrid* hg;  // exact terrain heights (host, terrain.h); null: estimateSurfaceY
 	int prefilter;         // building conditions are a necessary-condition prefilter (see Query.buildingSlack)
 	int maxPcs;            // size of pcs
@@ -460,9 +462,21 @@ HDN bool evalBuilding(EvalCtx& c, const Node& nd, int depth) {
 	if (c.prefilter && c.q->buildingPass) return true;
 	int need = c.prefilter ? nd.count - c.q->buildingSlack : nd.count;
 	if (need <= 0) return true;
-	if (c.layoutSt != c.curStructure || c.layoutCx != c.curCx || c.layoutCz != c.curCz) {
-		c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, c.maxPcs, c.hg);
-		c.layoutSt = c.curStructure, c.layoutCx = c.curCx, c.layoutCz = c.curCz;
+	bool fresh = c.layoutSt != c.curStructure || c.layoutCx != c.curCx || c.layoutCz != c.curCz;
+	if (fresh || c.layoutPartial) {
+		int n0 = 0;  // a cached prefix that already holds enough pieces answers without a full layout
+		if (!fresh)
+			for (int i = 0; i < c.npcs && n0 < need; i++) {
+				int cat = pieceCategory(*c.J, c.pcs[i]);
+				n0 += cat >= 0 && ((nd.cat[cat >> 6] >> (cat & 63)) & 1);
+			}
+		if (fresh || n0 < need) {
+			// exact host check only: stop the layout once `need` matching pieces are in (the full layout only adds pieces)
+			bool early = c.hg && !c.prefilter && !c.q->hasVillageLoot;
+			c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, c.maxPcs, c.hg, early ? nd.cat : nullptr, need,
+			                       &c.layoutPartial);
+			c.layoutSt = c.curStructure, c.layoutCx = c.curCx, c.layoutCz = c.curCz;
+		}
 	}
 	if (c.npcs < 0 && c.prefilter) return true;  // more pieces than the buffer holds: let the exact check decide
 	int n = 0;
@@ -491,8 +505,8 @@ HDN bool evalLoot(EvalCtx& c, const Node& nd, int depth) {
 	}
 	if (!c.J || !c.pcs) return false;
 	if (c.prefilter) return true;  // decided by the exact check
-	if (c.layoutSt != c.curStructure || c.layoutCx != c.curCx || c.layoutCz != c.curCz) {
-		c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, c.maxPcs, c.hg);
+	if (c.layoutPartial || c.layoutSt != c.curStructure || c.layoutCx != c.curCx || c.layoutCz != c.curCz) {
+		c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, c.maxPcs, c.hg, nullptr, 0, &c.layoutPartial);
 		c.layoutSt = c.curStructure, c.layoutCx = c.curCx, c.layoutCz = c.curCz;
 	}
 	if (c.npcs <= 0) return false;

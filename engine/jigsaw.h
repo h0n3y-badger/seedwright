@@ -462,8 +462,13 @@ HDN bool jFits(const Piece* pc, int n, const JBox& base, int region, const JBox&
 // 0 = no structure (empty start element / unsupported), -1 = more than maxOut pieces.
 // Does not re-check the biome: pick the structure with jigsawStructureAt / structureAt first.
 // Device stack use: ~2.5 KB (+ ~2 KB for the height estimate) + the caller's maxOut * sizeof(Piece) (20 B); villages reach ~280 pieces.
+HD int pieceCategory(const JigsawTables& J, const Piece& p);
+// stopCat/stopNeed: stop early (*partial = true) once stopNeed pieces of a category in stopCat (Node.cat bit mask)
+// are placed. Pieces are only ever appended, so the partial layout is a prefix of the full one.
 HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, int structureIndex, int chunkX, int chunkZ, Piece* out, int maxOut,
-                     const HeightGrid* g = nullptr) {
+                     const HeightGrid* g = nullptr, const uint64_t* stopCat = nullptr, int stopNeed = 0, bool* partial = nullptr) {
+	if (partial) *partial = false;
+	int stopHave = 0;
 	int js = structureIndex >= 0 && structureIndex < MAX_STRUCTS ? J.structOf[structureIndex] : -1;
 	if (js < 0 || maxOut < 1) return 0;
 	const JStruct& S = J.st[js];
@@ -484,6 +489,13 @@ HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, i
 		c.prio = -32768;
 	}
 	if (S.maxDepth <= 0) return 1;
+	if (stopCat) {
+		int cat = pieceCategory(J, out[0]);
+		if (cat >= 0 && ((stopCat[cat >> 6] >> (cat & 63)) & 1) && ++stopHave >= stopNeed) {
+			*partial = true;
+			return 1;
+		}
+	}
 	JBox aabb;  // AABB(centerX - h, max(centerY - v, minY + padBottom), ..., centerX + h + 1, min(centerY + v + 1, maxY + 1 - padTop), ...)
 	{
 		int cxr = s.centerX - ox, czr = s.centerZ - oz;
@@ -578,6 +590,12 @@ HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, i
 							if (!canAttach(sj, tj)) continue;
 							JBox bb;
 							int rpy;
+							if (baseH == HEIGHT_UNKNOWN && !(srcRigid && tgtRigid)) {
+								// x/z don't depend on the height: a box outside the free shape's base in x/z can't fit at any y,
+								// so don't sample the terrain column for it (only the y placement needs baseH)
+								JBox xz = elemBox(J, te, tx - tj.x, 0, tz - tj.z, tr);
+								if (xz.x0 < base.x0 || xz.x1 > base.x1 || xz.z0 < base.z0 || xz.z1 > base.z1) continue;
+							}
 							connectBox(w, pk, g, J, te, tr, tj, sj, tx, ty, tz, fy, srcLocalY, srcRigid && tgtRigid, src.y0, expandTo0 ? TE.expand[tr] : 0, ox,
 							           oz, baseH, bb, rpy);
 							if (jFits(out, n, base, region, bb)) mask[tr] |= 1ULL << k;
@@ -621,6 +639,13 @@ HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, i
 						p.region = (int16_t)region;
 						p.prio = depth + 1 <= S.maxDepth ? (int16_t)sj.placement : (int16_t)-32768;
 						placed = true;
+						if (stopCat) {
+							int cat = pieceCategory(J, p);
+							if (cat >= 0 && ((stopCat[cat >> 6] >> (cat & 63)) & 1) && ++stopHave >= stopNeed) {
+								*partial = true;
+								return n;
+							}
+						}
 						break;
 					}
 				}
@@ -632,8 +657,8 @@ HDN int jigsawLayout(const World& w, const PackDev& pk, const JigsawTables& J, i
 
 // village-flavoured alias (the query side asks for villages)
 HDN int villageLayout(const World& w, const PackDev& pk, const JigsawTables& J, int structureIndex, int chunkX, int chunkZ, Piece* out, int maxOut,
-                      const HeightGrid* g = nullptr) {
-	return jigsawLayout(w, pk, J, structureIndex, chunkX, chunkZ, out, maxOut, g);
+                      const HeightGrid* g = nullptr, const uint64_t* stopCat = nullptr, int stopNeed = 0, bool* partial = nullptr) {
+	return jigsawLayout(w, pk, J, structureIndex, chunkX, chunkZ, out, maxOut, g, stopCat, stopNeed, partial);
 }
 
 HD int pieceTemplate(const JigsawTables& J, const Piece& p) { return J.elem[p.elem].kind == JK_FEATURE ? -1 : J.elem[p.elem].tpl; }

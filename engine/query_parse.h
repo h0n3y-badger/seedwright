@@ -302,7 +302,7 @@ private:
 		q.n[n].count = count;
 		q.n[n].item = item;
 		q.n[n].lootJig = jig ? 1 : 0;
-		if (jig) q.hasBuildings = 1;  // village layouts, exact check like buildings
+		if (jig) q.hasBuildings = q.hasVillageLoot = 1;  // village layouts, exact check like buildings
 		return n;
 	}
 	int parseAtom(int depth, uint64_t structCtx) {
