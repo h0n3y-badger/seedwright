@@ -196,6 +196,7 @@ HD int64_t dist2(int ax, int az, int bx, int bz) {
 enum { EVAL_A, EVAL_PRE, EVAL_B };
 
 struct EvalCtx {
+	bool warp;  // GPU kStageBWarp: the 32 lanes of a warp evaluate one seed in lockstep (warp.h hot loops)
 	const World* w;
 	const PackDev* pk;
 	const StructTables* T;
@@ -345,7 +346,24 @@ HDN bool kReject(const Query& q, const Node& nd, int s, const int64_t* t) {
 	return true;
 }
 
+#ifdef __CUDA_ARCH__
+__device__ bool evalBiomeWarp(EvalCtx& c, const Node& nd, int ax, int az, int depth);
+__device__ int strongholdResolveWarp(const World& w, const PackDev& pk, const SetDev& s, int ix, int iz, uint64_t forkSeed, int& outX,
+                                     int& outZ, int ax, int az, int64_t r2);
+__device__ void spawnOriginWarp(const World& w, const PackDev& pk, int& outX, int& outZ);
+#endif
+HD int shResolveAny(const EvalCtx& c, const SetDev& s, int ix, int iz, uint64_t forkSeed, int& outX, int& outZ, int ax = 0, int az = 0,
+                    int64_t r2 = -1) {
+#ifdef __CUDA_ARCH__
+	if (c.warp) return strongholdResolveWarp(*c.w, *c.pk, s, ix, iz, forkSeed, outX, outZ, ax, az, r2);
+#endif
+	return strongholdResolve(*c.w, *c.pk, s, ix, iz, forkSeed, outX, outZ, ax, az, r2);
+}
+
 HDN bool evalBiome(EvalCtx& c, const Node& nd, int ax, int az, int depth) {
+#ifdef __CUDA_ARCH__
+	if (c.warp) return evalBiomeWarp(c, nd, ax, az, depth);
+#endif
 	// on a 16-block grid, nearest rings first; y=any tries the cave levels (y -48..48, every 16).
 	// Same samples and order as biomeAt(..., 0); y-independent climate ops are evaluated once per column.
 	int64_t R2 = (int64_t)nd.radius * nd.radius;
@@ -400,7 +418,7 @@ HD const SetDev* ringSet(const StructTables& T) {
 // search stops as soon as the side is settled; PRE mode decides on the boxes alone.
 HDN void shResolve(EvalCtx& c, const SetDev& ring, int i) {
 	if ((c.shDone >> i) & 1) return;
-	strongholdResolve(*c.w, *c.pk, ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], c.shX[i], c.shZ[i]);
+	shResolveAny(c, ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], c.shX[i], c.shZ[i]);
 	c.shDone |= 1u << i;
 }
 
@@ -426,7 +444,7 @@ HDN bool evalStronghold(EvalCtx& c, const Node& nd, int ni, int ax, int az, int 
 			else cand[nc++] = i;
 		}
 		for (int k = 0; k < nc && n < nd.count && n + (nc - k) >= nd.count; k++) {
-			int i = cand[k], fx, fz, r = strongholdResolve(*c.w, *c.pk, *ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], fx, fz, ax, az, R2);
+			int i = cand[k], fx, fz, r = shResolveAny(c, *ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], fx, fz, ax, az, R2);
 			if (r == SH_EXACT) {
 				c.shX[i] = fx, c.shZ[i] = fz;
 				c.shDone |= 1u << i;
@@ -458,7 +476,7 @@ HDN bool evalStronghold(EvalCtx& c, const Node& nd, int ni, int ax, int az, int 
 			continue;
 		}
 		if (!children && !((c.shDone >> i) & 1)) {
-			int fx, fz, r = strongholdResolve(*c.w, *c.pk, *ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], fx, fz, ax, az, R2);
+			int fx, fz, r = shResolveAny(c, *ring, c.shRawX[i], c.shRawZ[i], c.shFork[i], fx, fz, ax, az, R2);
 			if (r == SH_EXACT) {
 				c.shX[i] = fx, c.shZ[i] = fz;
 				c.shDone |= 1u << i;
@@ -613,8 +631,9 @@ HDN bool stageA(const StructTables& T, const Query& q, uint64_t seed) {
 // layouts with Query.buildingSlack); neither: estimated layouts taken at face value (approximate).
 HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const Query& q, Hit& hit, const JigsawTables* J = nullptr,
                 Piece* pieces = nullptr, const HeightGrid* hg = nullptr, bool prefilter = false, int maxPieces = MAX_PIECES,
-                const LootTables* L = nullptr) {
+                const LootTables* L = nullptr, bool warp = false, int phase = 0) {  // phase 1: PRE only, 2: skip PRE (passed)
 	EvalCtx c{};
+	c.warp = warp;
 	c.w = &w;
 	c.pk = &pk;
 	c.T = &T;
@@ -634,9 +653,16 @@ HDN bool stageB(const World& w, const PackDev& pk, const StructTables& T, const 
 	hit.spawnX = hit.spawnZ = 0;
 	// cheap necessary pass first (structures with biome checks, around 0,0 with slack), then the spawn
 	c.mode = EVAL_PRE;
-	if (!q.exact && !evalNode(c, q.root, 0, 0, q.anchorSpawn ? q.slack : 0, 0)) return false;
+	if (!q.exact && phase != 2 && !evalNode(c, q.root, 0, 0, q.anchorSpawn ? q.slack : 0, 0)) return false;
+	if (phase == 1) return true;
 	int ax = 0, az = 0;
-	if (q.anchorSpawn || q.needSpawn) spawnOrigin(w, pk, ax, az);
+	if (q.anchorSpawn || q.needSpawn) {
+#ifdef __CUDA_ARCH__
+		if (warp) spawnOriginWarp(w, pk, ax, az);
+		else
+#endif
+			spawnOrigin(w, pk, ax, az);
+	}
 	hit.spawnX = c.spawnX = ax;
 	hit.spawnZ = c.spawnZ = az;
 	if (!q.anchorSpawn) ax = az = 0;

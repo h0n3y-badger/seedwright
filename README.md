@@ -151,11 +151,15 @@ can be edited and turned back into blocks. Menu launcher: `gui/install.sh` (writ
 puts it in `/usr/share/applications` for launchers that only read that, like tux; `--uninstall` removes it).
 
 Pipeline: stage A tests only the low 48 bits (structure placement is pure LCG) at ~5.7 G seeds/s on an
-RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome/spawn checks
-(26.3: ~127 k seeds/s for `village within 400`, ~45 k for `biome cherry_grove within 300`; CPU about 1/5 of
-that on 16 threads). Biome conditions reject most grid points after the temperature and humidity noises alone
-(exact: a non-wanted climate leaf that contains a wanted one in every unknown dimension and is closer in the known
-ones wins whatever the rest gives).
+RTX 5070 Ti; stage B expands each survivor's 65 536 upper halves with full biome/spawn checks. On the GPU stage B
+runs one warp per seed (`engine/warp.h`): the 32 lanes walk the query in lockstep and split the hot loops (noise
+init, spawn spiral, biome rings, the stronghold 57x57 biome search) with exact in-order merging; structure
+conditions are pre-checked one thread per seed first. Building conditions keep the per-thread kernel;
+`--no-warp` forces it everywhere. 26.3, full searches: `village within 400` ~3.0 s per 2^24 low seeds,
+`biome cherry_grove within 300` ~9.6 s per 1.5 M full seeds (was 26 s per thread), `stronghold within 1350`
+~12.6 s (was 102 s). CPU is much slower on biome/stronghold queries. Biome conditions reject most grid points
+after the temperature and humidity noises alone (exact: a non-wanted climate leaf that contains a wanted one in
+every unknown dimension and is closer in the known ones wins whatever the rest gives).
 
 ## Layout
 
@@ -177,9 +181,9 @@ ones wins whatever the rest gives).
   structure start checks, the spawn block and surface biomes still use the estimate
 - ores (decoration seeds + ore placement + whether the blocks survive terrain/caves)
 - `--biome` at the real surface; nether/end
-- GPU stage B is one thread per seed; a block-per-seed version would be much faster
-- stronghold conditions are slow (~1–2k seeds/s on GPU: each stronghold near the edge of the radius needs a
-  57×57 biome search); jigsaw structures other than villages/outposts aren't oracle-checked; trial chambers have no layouts
+- GPU building conditions (village layouts) still run one thread per seed
+- stronghold conditions are the slowest kind (each stronghold near the edge of the radius needs a 57×57 biome
+  search, split across a warp on the GPU); jigsaw structures other than villages/outposts aren't oracle-checked; trial chambers have no layouts
 
 ## License
 

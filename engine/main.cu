@@ -2,6 +2,7 @@
 #include "pack.h"
 #include "structures.h"
 #include "query.h"
+#include "warp.h"
 #include "query_parse.h"
 #include "jigsaw_cli.h"
 #include "crack_cli.h"
@@ -684,6 +685,18 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 	CK(cudaMalloc(&dHits, sizeof(Hit) * capH));
 	int64_t* dSeeds;
 	CK(cudaMalloc(&dSeeds, sizeof(int64_t) * batch));
+	// warp-per-seed stage B (warp.h): not for building/loot layouts (the per-thread kernel keeps those)
+	// (default; --no-warp: the per-thread kernel for everything). PRE runs per thread first when it can reject
+	// seeds (structure conditions); otherwise it would only cost a second worldInit per seed.
+	const bool useWarp = !opt.count("no-warp") && !q.hasBuildings;
+	bool preReject = false;
+	for (int i = 0; i < q.nnodes; i++) preReject |= q.n[i].kind == N_STRUCTURE;
+	int64_t* dSeedsP = nullptr;
+	unsigned* dNP = nullptr;
+	if (useWarp) {
+		CK(cudaMalloc(&dSeedsP, sizeof(int64_t) * batch));
+		CK(cudaMalloc(&dNP, 4));
+	}
 	std::vector<int64_t> hseeds;
 	long long found = 0;
 	long long prefilterHits = 0;
@@ -691,7 +704,19 @@ static int searchGpu(const Pack& P, const StructTables& T, const Query& q, std::
 	std::function<void(const std::vector<int64_t>&, size_t, unsigned)> launch = [&](const std::vector<int64_t>& seeds, size_t off, unsigned n) {
 		CK(cudaMemcpy(dSeeds, seeds.data() + off, sizeof(int64_t) * n, cudaMemcpyHostToDevice));
 		CK(cudaMemset(dNH, 0, 4));
-		kStageB<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dHits, dNH, capH, dJ, dPieces, TR != nullptr, dLoot);
+		if (useWarp) {
+			unsigned np = n;
+			const int64_t* src = dSeeds;
+			if (!q.exact && preReject) {  // PRE per thread, the rest per warp on the survivors
+				CK(cudaMemset(dNP, 0, 4));
+				kStagePre<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dJ, dLoot, dSeedsP, dNP);
+				CK(cudaGetLastError());
+				CK(cudaMemcpy(&np, dNP, 4, cudaMemcpyDeviceToHost));
+				src = dSeedsP;
+			}
+			if (np) kStageBWarp<<<blocksB, tpb>>>(dPk, dT, dQ, src, np, dW, dHits, dNH, capH, dJ, TR != nullptr, dLoot, src != dSeeds);
+		}
+		else kStageB<<<blocksB, tpb>>>(dPk, dT, dQ, dSeeds, n, dW, dHits, dNH, capH, dJ, dPieces, TR != nullptr, dLoot);
 		CK(cudaGetLastError());
 		unsigned nh;
 		CK(cudaMemcpy(&nh, dNH, 4, cudaMemcpyDeviceToHost));
