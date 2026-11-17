@@ -234,9 +234,11 @@ HDN int estimateSurfaceY(const World& w, const PackDev& pk, int x, int z) {
 	double pv[MAX_OPS], vv[MAX_OPS];
 	int d = pk.climate[4];
 	const int ya = 0, yb = 160;
-	evalOpsState(w, pk, x, ya, z, false, false, d, pv, vv, false);
+	// only the ops depth reads (pk.depthMask: e.g. not temperature / vegetation); ops are pure, so a subset in
+	// index order gives the same values
+	evalOpsState(w, pk, x, ya, z, false, false, d, pv, vv, false, pk.depthMask);
 	double a = pv[d];
-	evalOpsState(w, pk, x, yb, z, false, false, d, pv, vv, true);
+	evalOpsState(w, pk, x, yb, z, false, false, d, pv, vv, true, pk.depthMask);
 	double b = pv[d];
 	int top;
 	if (a == b) top = a >= 0.0 ? pk.minY + pk.height - 1 : pk.minY;

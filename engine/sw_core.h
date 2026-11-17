@@ -158,6 +158,7 @@ struct PackDev {
 	int nspawn, spawnTerms[4], spawnOp[4][8];
 	int64_t spawnLo[4][8], spawnHi[4][8];
 	SpawnPlan spawnPlan;  // spawnPrepare()
+	uint64_t depthMask;   // spawnPrepare(): ops climate[4] (depth) reads, transitively, splines exact (estimateSurfaceY)
 	int nspiral[2];
 	int16_t spiral[2][MAX_SPIRAL][2];  // NoiseSpawnFinder spiral offsets (seed-independent)
 	Op ops[MAX_OPS];
@@ -670,8 +671,40 @@ HD int64_t spawnFitness(const World& w, const PackDev& pk, int bx, int bz) {
 // NoiseSpawnFinder's two spirals (radius <= 2048 step 512, then radius <= 512 step 32 around the stage-1 best).
 // The offsets (int)(sin(angle) * radius), (int)(cos(angle) * radius) don't depend on the seed: tabulated
 // once by spawnPrepare() (host) instead of ~930 sin/cos pairs per seed.
+// Exact dependency closure of op t: like opClosure, but a spline op adds only the coordinates its own spline
+// tree reads (opClosure takes every op before it).
+inline uint64_t opClosureExact(const PackDev& pk, int t) {
+	uint64_t dep[MAX_OPS];
+	for (int i = 0; i <= t; i++) {
+		const Op& o = pk.ops[i];
+		uint64_t m = 1ull << i;
+		if (o.a >= 0) m |= dep[o.a];
+		if (o.b >= 0) m |= dep[o.b];
+		if (o.c >= 0) m |= dep[o.c];
+		if (o.code == OP_SPLINE) {
+			int stk[MAX_SPLINES], ns = 0;
+			bool seen[MAX_SPLINES] = {};
+			stk[ns++] = o.i0;
+			seen[o.i0] = true;
+			while (ns > 0) {
+				const SplineNode& sn = pk.splines[stk[--ns]];
+				if (sn.coord < 0) continue;
+				if (sn.coord >= i) abort();  // coordinates come before the spline op
+				m |= dep[sn.coord];
+				for (int k = 0; k < sn.n; k++) {
+					int ch = pk.schild[sn.start + k];
+					if (!seen[ch]) seen[ch] = true, stk[ns++] = ch;
+				}
+			}
+		}
+		dep[i] = m;
+	}
+	return dep[t];
+}
+
 inline void spawnPrepare(PackDev& pk) {
 	spawnPlanInit(pk, pk.spawnPlan);
+	pk.depthMask = opClosureExact(pk, pk.climate[4]);
 	const float steps[2][2] = {{2048.0f, 512.0f}, {512.0f, 32.0f}};
 	for (int s = 0; s < 2; s++) {
 		float maxR = steps[s][0], inc = steps[s][1];
