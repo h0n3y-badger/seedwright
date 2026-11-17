@@ -506,8 +506,9 @@ HDN bool evalBuilding(EvalCtx& c, const Node& nd, int depth) {
 				n0 += cat >= 0 && ((nd.cat[cat >> 6] >> (cat & 63)) & 1);
 			}
 		if (fresh || n0 < need) {
-			// exact host check only: stop the layout once `need` matching pieces are in (the full layout only adds pieces)
-			bool early = c.hg && !c.prefilter && !c.q->hasVillageLoot;
+			// stop the layout once `need` matching pieces are in (the full layout only adds pieces). Exact host check,
+			// and the prefilter: there a full layout that overflows (-1) passes too, and loot passes without a layout.
+			bool early = c.prefilter || (c.hg && !c.q->hasVillageLoot);
 			c.npcs = villageLayout(*c.w, *c.pk, *c.J, c.curStructure, c.curCx, c.curCz, c.pcs, c.maxPcs, c.hg, early ? nd.cat : nullptr, need,
 			                       &c.layoutPartial);
 			c.layoutSt = c.curStructure, c.layoutCx = c.curCx, c.layoutCz = c.curCz;
